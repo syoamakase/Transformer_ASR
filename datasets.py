@@ -3,44 +3,47 @@ import math
 import numpy as np
 import pandas as pd
 #import librosa
+from operator import itemgetter
+from typing import Optional
 import collections
 import os
 import random
 from struct import unpack, pack
 import torch
 from torch.utils.data import Dataset, DataLoader, SequentialSampler, Sampler
+from torch.utils.data.distributed import DistributedSampler
 import sentencepiece as spm
 from tqdm import tqdm
 
-from utils import hparams as hp
 
-class TrainDatasets(Dataset):                                                     
+class TrainDatasets(Dataset):
     """
     Dataset class.
-    """                                                   
-    def __init__(self, csv_file, root_dir=None, spm_model=None, spec_aug=False, feat_norm=[None, None]):
-        """                                                                     
+    """
+    def __init__(self, csv_file, hp, root_dir=None, spm_model=None, spec_aug=False, feat_norm=[None, None]):
+        """
         Args:                                                                   
             csv_file (string): Path to the csv file with annotations.           
             root_dir (string): Directory with all the wavs.                     
                                                                                 
-        """                                                                     
+        """
         # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)
         assert spm_model is not None, "Please specify the path of sentencepiece model" 
           
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
+        self.hp = hp
         self.root_dir = root_dir
-        self.sp = spm.SentencePieceProcessor() 
-        self.sp.Load(spm_model)                          
+        self.sp = spm.SentencePieceProcessor()
+        self.sp.Load(spm_model)
         self.spec_aug = spec_aug
-        if feat_norm[0] is not None: 
+        if feat_norm[0] is not None:
             self.feat_norm = True
             self.mean = np.load(feat_norm[0]).reshape(80)
             self.var = np.load(feat_norm[1]).reshape(80)
         else:
             self.feat_norm = False
 
-        if hp.lengths_file is None or not os.path.exists(hp.lengths_file):
+        if self.hp.lengths_file is None or not os.path.exists(self.hp.lengths_file):
             print('lengths_file is not exists. Make...')
             lengths_list = []
             pbar = tqdm(range(len(self.landmarks_frame)))
@@ -57,10 +60,7 @@ class TrainDatasets(Dataset):
                 lengths_list.append(length)
                 
             self.lengths_np = np.array(lengths_list)
-            np.save(hp.lengths_file, self.lengths_np)
-                                                                                
-    # def load_wav(self, filename):                                               
-    #     return librosa.load(filename, sr=hp.sample_rate) 
+            np.save(self.hp.lengths_file, self.lengths_np)
 
     def load_htk(self, filename):
         fh = open(filename, "rb")
@@ -82,7 +82,7 @@ class TrainDatasets(Dataset):
             f_zero = random.randrange(0, num_mel_channels - f)
             # avoids randrange error if values are equal and range is empty
             if (f_zero == f_zero + f): return cloned
-            mask_end = random.randrange(f_zero, f_zero + f) 
+            mask_end = random.randrange(f_zero, f_zero + f)
             if (replace_with_zero): cloned[:, f_zero:mask_end] = 0
             else: cloned[:, f_zero:mask_end] = cloned.mean()
         return cloned
@@ -110,12 +110,11 @@ class TrainDatasets(Dataset):
         mel_name = self.landmarks_frame.loc[idx, 0]
         text_raw = self.landmarks_frame.loc[idx, 1].strip()
                                                                                 
-        # text = np.asarray(text_to_sequence(text, [hp.cleaners]), dtype=np.int32)
+        # text = np.asarray(text_to_sequence(text, [self.hp.cleaners]), dtype=np.int32)
         textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text_raw) + [self.sp.eos_id()]
         text = np.array([int(t) for t in textids], dtype=np.int32)
         if '.htk' in mel_name:
             mel_input = self.load_htk(mel_name)
-            mel_input = mel_input[:, :hp.mel_dim]
             mel_length = mel_input.shape[0]
         elif '.npy' in mel_name:
             mel_input = np.load(mel_name)
@@ -129,11 +128,11 @@ class TrainDatasets(Dataset):
             num_T = min(20, math.floor(0.04*mel_length))
             T = math.floor(0.04*mel_length)
             #T = min(mel_input.shape[0] // 2 - 1, 100)
-            #mel_input = time_warp(self._time_mask(self._freq_mask(mel_input, F=hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2,replace_with_zero=True))
-            #mel_input = self._time_mask(self._freq_mask(mel_input, F=hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2, replace_with_zero=True)
-            mel_input = self._time_mask(self._freq_mask(mel_input, F=hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=num_T, replace_with_zero=True)
+            #mel_input = time_warp(self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2,replace_with_zero=True))
+            #mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2, replace_with_zero=True)
+            mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=num_T, replace_with_zero=True)
             mel_length = mel_input.shape[0]
-        # mel_input = np.concatenate([np.zeros([1,hp.num_mels], np.float32), mel[:-1,:]], axis=0)
+        # mel_input = np.concatenate([np.zeros([1,self.hp.num_mels], np.float32), mel[:-1,:]], axis=0)
         text_length = len(text)                                                 
         pos_text = np.arange(1, text_length + 1)
         pos_mel = np.arange(1, mel_input.shape[0] + 1) 
@@ -162,7 +161,7 @@ class TrainDatasets(Dataset):
 #         self.root_dir = root_dir 
                                                                                 
 #     def load_wav(self, filename):                                               
-#         return librosa.load(filename, sr=hp.sample_rate) 
+#         return librosa.load(filename, sr=self.hp.sample_rate) 
 
 #     def load_htk(self, filename):
 #         fh = open(filename, "rb")
@@ -182,7 +181,7 @@ class TrainDatasets(Dataset):
 #     def __getitem__(self, idx): 
 #         mel_name = self.landmarks_frame.loc[idx, 0] #os.path.join(self.root_dir, self.landmarks_frame.loc[idx, 0])
                                                                                 
-#         # text = np.asarray(text_to_sequence(text, [hp.cleaners]), dtype=np.int32)
+#         # text = np.asarray(text_to_sequence(text, [self.hp.cleaners]), dtype=np.int32)
 #         text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
 #         if '.htk' in mel_name:
 #             mel_input = self.load_htk(mel_name)[:,:40]
@@ -202,7 +201,7 @@ def collate_fn(batch):
         mel_lengths = [d['mel_length'] for d in batch]
         text_length = [d['text_length'] for d in batch]
         pos_mel = [d['pos_mel'] for d in batch]
-        pos_text= [d['pos_text'] for d in batch]
+        pos_text = [d['pos_text'] for d in batch]
         
         #text = [i for i,_ in sorted(zip(text, text_length), key=lambda x: x[1], reverse=True)]
         #mel_input = [i for i, _ in sorted(zip(mel_input, text_length), key=lambda x: x[1], reverse=True)]
@@ -230,7 +229,7 @@ def _prepare_data(inputs):
 
 def _pad_per_step(inputs):
     timesteps = inputs.shape[-1]
-    return np.pad(inputs, [[0,0],[0,0],[0, hp.outputs_per_step - (timesteps % hp.outputs_per_step)]], mode='constant', constant_values=0.0)
+    return np.pad(inputs, [[0,0],[0,0],[0, self.self.hp.outputs_per_step - (timesteps % self.hp.outputs_per_step)]], mode='constant', constant_values=0.0)
 
 def get_param_size(model):
     params = 0
@@ -323,6 +322,83 @@ class LengthsBatchSampler(Sampler):
     def __len__(self):
         return len(self.all_indices)
 
+
+class DistributedSamplerWrapper(DistributedSampler):
+    """
+    Wrapper over `Sampler` for distributed training.
+    Allows you to use any sampler in distributed mode.
+    It is especially useful in conjunction with
+    `torch.nn.parallel.DistributedDataParallel`. In such case, each
+    process can pass a DistributedSamplerWrapper instance as a DataLoader
+    sampler, and load a subset of subsampled data of the original dataset
+    that is exclusive to it.
+    .. note::
+        Sampler is assumed to be of constant size.
+    """
+
+    def __init__(
+        self,
+        sampler,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+    ):
+        """
+        Args:
+            sampler: Sampler used for subsampling
+            num_replicas (int, optional): Number of processes participating in
+              distributed training
+            rank (int, optional): Rank of the current process
+              within ``num_replicas``
+            shuffle (bool, optional): If true (default),
+              sampler will shuffle the indices
+        """
+        super(DistributedSamplerWrapper, self).__init__(
+            DatasetFromSampler(sampler),
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+        )
+        self.sampler = sampler
+
+    def __iter__(self):
+        """@TODO: Docs. Contribution is welcome."""
+        self.dataset = DatasetFromSampler(self.sampler)
+        indexes_of_indexes = super().__iter__()
+        subsampler_indexes = self.dataset
+        return iter(itemgetter(*indexes_of_indexes)(subsampler_indexes))
+
+
+class DatasetFromSampler(Dataset):
+    """Dataset to create indexes from `Sampler`.
+    Args:
+        sampler: PyTorch sampler
+    """
+
+    def __init__(self, sampler: Sampler):
+        """Initialisation for DatasetFromSampler."""
+        self.sampler = sampler
+        self.sampler_list = None
+
+    def __getitem__(self, index: int):
+        """Gets element of the dataset.
+        Args:
+            index: index of the element in the dataset
+        Returns:
+            Single element by index
+        """
+        if self.sampler_list is None:
+            self.sampler_list = list(self.sampler)
+        return self.sampler_list[index]
+
+    def __len__(self) -> int:
+        """
+        Returns:
+            int: length of the dataset
+        """
+        return len(self.sampler)
+
+
 class NumBatchSampler(Sampler):
     """
     LengthsBatchSampler - Sampler for variable batch size. Mainly, we use it for Transformer.
@@ -351,17 +427,17 @@ class NumBatchSampler(Sampler):
     def __len__(self):
         return len(self.all_indices)
 
-def get_dataset(script_file, spm_model, spec_aug=True, feat_norm=[None, None]):
+def get_dataset(script_file, spm_model, hp, spec_aug=True, feat_norm=[None, None]):
     print('script_file = {}'.format(script_file))
     print('spec_auc = {}'.format(spec_aug))
     print('feat norm = {}'.format(feat_norm))
-    return TrainDatasets(script_file, spm_model=spm_model, spec_aug=spec_aug, feat_norm=feat_norm)
+    return TrainDatasets(script_file, hp, spm_model=spm_model, spec_aug=spec_aug, feat_norm=feat_norm)
 
 if __name__ == '__main__':
-    hp.configure('ctc-transformer.tedlium2_1000kTTS.1000bpe.seqlen120000.25000factor5.0.conv2d_accm1_clip5.0_drop0.1_cnn128_mtl0.8_TnormTrue_pealphaFalse/hparams.py')
-    datasets = get_dataset(hp.train_script, hp.spm_model)
+    self.hp.configure('ctc-transformer.tedlium2_1000kTTS.1000bpe.seqlen120000.25000factor5.0.conv2d_accm1_clip5.0_drop0.1_cnn128_mtl0.8_TnormTrue_pealphaFalse/hparams.py')
+    datasets = get_dataset(self.hp.train_script, self.hp.spm_model)
     # sampler = NumBatchSampler(datasets, 100)
-    sampler = LengthsBatchSampler(datasets, 100000, hp.lengths_file)
+    sampler = LengthsBatchSampler(datasets, 100000, self.hp.lengths_file)
     
     dataloader = DataLoader(datasets, batch_sampler=sampler, num_workers=8, collate_fn=collate_fn)
     #pbar = tqdm(dataloader)

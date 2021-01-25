@@ -12,13 +12,14 @@ class __HParams:
             self.configure(path)
 
     def __getattr__(self, item):
-        print(item)
-        if not self.is_configured():
-            raise AttributeError("HParams not configured yet. Call self.configure()")
-        else:
-            if not hasattr(super(), item):
-                raise AttributeError(f'HParams does not have "{item}"')
-            return super().__getattr__(item)
+        #print(item)
+        #if not self.is_configured():
+        #    raise AttributeError("HParams not configured yet. Call self.configure()")
+        #else:
+        #    if not hasattr(super(), item):
+        #        raise AttributeError(f'HParams does not have "{item}"')
+        #    return super().__getattr__(item)
+        return super().__getattr__(item)
 
     def configure(self, path: Union[str, Path]):
         if self.is_configured():

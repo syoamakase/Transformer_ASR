@@ -10,11 +10,11 @@ import torch.nn as nn
 from shutil import copyfile
 
 #import hparams as hp
-from utils import hparams as hp
+#from utils import hparams as hp
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def log_config():
+def log_config(hp):
     print('PID = {}'.format(os.getpid()))
     print('cuda device = {}'.format(os.environ['CUDA_VISIBLE_DEVICES']))
     print('PyTorch version =', torch.__version__)
@@ -45,18 +45,6 @@ def load_dat(filename):
     dat = dat.byteswap()
     fh.close()
     return dat
-
-def frame_stacking(x, x_lengths, stack):
-    batch_size = x.shape[0]
-    newlen = x.shape[1] // stack
-    x_lengths = x_lengths // stack
-    stacked_x = x[:, 0:newlen*stack].reshape(batch_size, newlen, hp.lmfb_dim * stack)
-    return stacked_x, x_lengths
-
-def frame_stacking_legacy(x, stack):
-    newlen = len(x) // stack
-    stacked_x = x[0:newlen*stack].reshape(newlen, hp.lmfb_dim * stack)
-    return stacked_x
 
 def onehot(labels, num_output):
     """
@@ -167,7 +155,7 @@ def overwrite_hparams(args):
         if value is not None and value != 'load_name':
             setattr(hp, key, value)
 
-def fill_variables():
+def fill_variables(hp):
     default_var = {'pe_alpha': False, 'stop_lr_change': 100000000, 'feed_forward': 'linear', 'optimizer': 'adam', 'mel_dim':80, 'is_flat_start':False,'dataset_shuffle_all':False, 'optimizer_type': 'Noam', 'init_lr':1e-3, 'save_per_epoch': 50, 'save_attention_per_step': 2000,
                     'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':''}
     for key, value in default_var.items():
