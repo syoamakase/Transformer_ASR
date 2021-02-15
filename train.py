@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
 from utils import hparams as hp
 from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight
@@ -35,7 +36,7 @@ def get_learning_rate(step):
     d_model = 256
     return warmup_factor * min(step ** -0.5, step * warmup_step ** -1.5) * (d_model ** -0.5)
 
-def train_loop(model, optimizer, step, args, hp):
+def train_loop(model, optimizer, step, epoch, args, hp, rank):
     scaler = torch.cuda.amp.GradScaler()
     src_pad = 0
     trg_pad = 0
@@ -55,6 +56,7 @@ def train_loop(model, optimizer, step, args, hp):
 
     train_len = len(dataloader)
     local_time = time.time()
+    device = f'cuda:{rank}'
     label_smoothing = True
     for d in dataloader:
         if hp.optimizer_type == 'Noam':
@@ -63,12 +65,12 @@ def train_loop(model, optimizer, step, args, hp):
                 param_group['lr'] = lr
  
         text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
- 
-        text = text.to(DEVICE, non_blocking=True)
-        mel_input = mel_input.to(DEVICE, non_blocking=True)
-        pos_text = pos_text.to(DEVICE, non_blocking=True)
-        pos_mel = pos_mel.to(DEVICE, non_blocking=True)
-        text_lengths = text_lengths.to(DEVICE, non_blocking=True)
+
+        text = text.to(device, non_blocking=True)
+        mel_input = mel_input.to(device, non_blocking=True)
+        pos_text = pos_text.to(device, non_blocking=True)
+        pos_mel = pos_mel.to(device, non_blocking=True)
+        text_lengths = text_lengths.to(device, non_blocking=True)
     
         batch_size = mel_input.shape[0]
     
@@ -80,6 +82,7 @@ def train_loop(model, optimizer, step, args, hp):
     
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
+            dist.barrier()
             if hp.mode == 'ctc-transformer':
                 youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask)
             else:
@@ -150,19 +153,25 @@ def train_loop(model, optimizer, step, args, hp):
                 n_correct = n_correct + 1
     acc = 1.0 * n_correct / float(sum(text_lengths))
     print('acc = {}'.format(acc))
-    if (epoch+1) % hp.save_per_epoch >= (hp.save_per_epoch - 10) or (epoch+1) % hp.save_per_epoch == 0:
-        torch.save(model.state_dict(), save_dir+"/network.epoch{}".format(epoch+1))
+    if rank == 0 and ((epoch+1) % hp.save_per_epoch >= (hp.save_per_epoch - 10) or (epoch+1) % hp.save_per_epoch == 0):
+        #torch.save(model.to('cpu').state_dict(), hp.save_dir+"/network.epoch{}".format(epoch+1))
+        torch.save(model.state_dict(), hp.save_dir+"/network.epoch{}".format(epoch+1))
+        print('save model')
+        #model = model.to(rank)
+        #torch.save(model.state_dict(), hp.save_dir+"/network.epoch{}".format(epoch+1))
     
-    if (epoch+1) % hp.save_per_epoch == 0:
-        torch.save(optimizer.state_dict(), save_dir+"/network.optimizer.epoch{}".format(epoch+1))
+    if rank==0 and (epoch+1) % hp.save_per_epoch == 0:
+        torch.save(optimizer.state_dict(), hp.save_dir+"/network.optimizer.epoch{}".format(epoch+1))
+        print('save optimizer')
 
+    dist.barrier()
     return step
 
-def train_epoch(model, optimizer, args, hp, step, start_epoch=0):
+def train_epoch(model, optimizer, args, hp, step, start_epoch=0, rank=0):
     for epoch in range(start_epoch, hp.max_epoch):
         start_time = time.time()
 
-        step = train_loop(model, optimizer, step, args, hp)
+        step = train_loop(model, optimizer, step, epoch, args, hp, rank)
  
         print("EPOCH {} end".format(epoch+1))
         print('elapsed time = {}'.format(time.time() - start_time))
@@ -211,12 +220,14 @@ def run_training(rank, args, hp):
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr)
     
     assert (hp.batch_size is None) != (hp.max_seqlen is None)
+
     
     if hp.loaded_epoch is not None:
         start_epoch = hp.loaded_epoch
         load_dir = hp.loaded_dir
         print('epoch {} loaded'.format(hp.loaded_epoch))
-        model.load_state_dict(load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch)))))
+        loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))))
+        model.load_state_dict(loaded_dict)
         if hp.is_flat_start:
             step = 1
             start_epoch = 0
@@ -230,15 +241,18 @@ def run_training(rank, args, hp):
                 sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
             train_sampler = DistributedSampler(sampler) if args.n_gpus > 1 else sampler
             dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4, collate_fn=collate_fn_transformer)
-            optimizer.load_state_dict(torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch)))))
+            loaded_dict = torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch))))
+            optimizer.load_state_dict(loaded_dict)
             step = hp.loaded_epoch * len(dataloader)
+            del loaded_dict
+            torch.cuda.empty_cache()
     else:
         start_epoch = 0
         step = 1
     
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print('params = {0:.2f}M'.format(pytorch_total_params / 1000 / 1000))
-    train_epoch(model, optimizer, args, hp, step=step, start_epoch=start_epoch)
+    train_epoch(model, optimizer, args, hp, step=step, start_epoch=start_epoch, rank=rank)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
