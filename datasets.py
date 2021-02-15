@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import argparse
 import math
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ class TrainDatasets(Dataset):
     """
     Dataset class.
     """
-    def __init__(self, csv_file, hp, root_dir=None, spm_model=None, spec_aug=False, feat_norm=[None, None]):
+    def __init__(self, csv_file, hp, root_dir=None, spec_aug=False, feat_norm=[None, None]):
         """
         Args:                                                                   
             csv_file (string): Path to the csv file with annotations.           
@@ -28,13 +29,12 @@ class TrainDatasets(Dataset):
                                                                                 
         """
         # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)
-        assert spm_model is not None, "Please specify the path of sentencepiece model" 
           
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
         self.hp = hp
         self.root_dir = root_dir
         self.sp = spm.SentencePieceProcessor()
-        self.sp.Load(spm_model)
+        self.sp.Load(self.hp.spm_model)
         self.spec_aug = spec_aug
         if feat_norm[0] is not None:
             self.feat_norm = True
@@ -427,21 +427,36 @@ class NumBatchSampler(Sampler):
     def __len__(self):
         return len(self.all_indices)
 
-def get_dataset(script_file, spm_model, hp, spec_aug=True, feat_norm=[None, None]):
+def get_dataset(script_file, hp, spec_aug=True, feat_norm=[None, None]):
     print('script_file = {}'.format(script_file))
     print('spec_auc = {}'.format(spec_aug))
     print('feat norm = {}'.format(feat_norm))
-    return TrainDatasets(script_file, hp, spm_model=spm_model, spec_aug=spec_aug, feat_norm=feat_norm)
+    return TrainDatasets(script_file, hp, spec_aug=spec_aug, feat_norm=feat_norm)
 
 if __name__ == '__main__':
-    self.hp.configure('ctc-transformer.tedlium2_1000kTTS.1000bpe.seqlen120000.25000factor5.0.conv2d_accm1_clip5.0_drop0.1_cnn128_mtl0.8_TnormTrue_pealphaFalse/hparams.py')
-    datasets = get_dataset(self.hp.train_script, self.hp.spm_model)
-    # sampler = NumBatchSampler(datasets, 100)
-    sampler = LengthsBatchSampler(datasets, 100000, self.hp.lengths_file)
-    
-    dataloader = DataLoader(datasets, batch_sampler=sampler, num_workers=8, collate_fn=collate_fn)
-    #pbar = tqdm(dataloader)
-    #for d in pbar:
-    for d in dataloader:
+    from utils import hparams as hp
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--hp_file', metavar='FILE', default='hparams.py')
+    parser.add_argument('--train_script', default=None)
+    args = parser.parse_args()
+
+    hp.configure(args.hp_file)
+    if args.train_script is not None:
+        hp.train_script = args.train_script
+    print(f'train script = {hp.train_script}')
+    datasets = TrainDatasets(hp.train_script, hp)
+    sampler = LengthsBatchSampler(datasets, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=False)
+    dataloader = DataLoader(datasets, batch_sampler=sampler, num_workers=4, collate_fn=collate_fn)
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    from tqdm import tqdm
+    pbar = tqdm(dataloader)
+    for d in pbar:
+        text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
+
+
+        text = text.to(DEVICE, non_blocking=True)
+        mel_input = mel_input.to(DEVICE, non_blocking=True)
+        pos_text = pos_text.to(DEVICE, non_blocking=True)
+        pos_mel = pos_mel.to(DEVICE, non_blocking=True)
+        text_lengths = text_lengths.to(DEVICE, non_blocking=True)
         #print(d[1].shape)
-        pass
