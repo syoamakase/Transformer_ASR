@@ -231,7 +231,7 @@ def run_training(rank, args, hp):
 
     model = model.to(rank)
     if args.n_gpus > 1:
-        model = DDP(model, device_ids=[rank])
+        model = DDP(torch.nn.SyncBatchNorm.convert_sync_batchnorm(model), device_ids=[rank])
     
     max_lr = hp.init_lr
     if hp.optimizer_type == 'Noam':
