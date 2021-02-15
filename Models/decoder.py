@@ -28,6 +28,7 @@ class Decoder(nn.Module):
         b, t2, _ = e_outputs.shape
         attns_dec_enc = torch.zeros((b, self.N, self.heads, t1, t2), device=x.device)
         attns_dec_dec = torch.zeros((b, self.N, self.heads, t1, t1), device=x.device)
+        del trg
         for i in range(self.N):
             x, attn_dec_dec, attn_dec_enc = self.layers[i](x, e_outputs, src_mask, trg_mask)
             attns_dec_dec[:,i] = attn_dec_dec.detach()

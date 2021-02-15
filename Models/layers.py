@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from Models.modules import MultiHeadAttention, FeedForward
+from Models.modules import MultiHeadAttention, FeedForward, FeedForwardConformer, ConvolutionModule, RelativeMultiHeadAttention
 
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, heads, dropout=0.1):
@@ -47,4 +47,26 @@ class EncoderLayer(nn.Module):
         x = x + self.dropout_1(x2)
         x2 = self.norm_2(x)
         x = x + self.dropout_2(self.ff(x2))
+        return x, attn_enc_enc
+
+class ConformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, heads, dropout=0.1):
+        super().__init__()
+        self.ff_1 = FeedForwardConformer(d_model, d_ff=d_model*4, dropout=dropout)
+        self.norm = nn.LayerNorm(d_model)
+        self.attn = RelativeMultiHeadAttention(heads, d_model, dropout=dropout)
+        self.conv_module = ConvolutionModule(d_model, dropout=dropout)
+        self.ff_2 = FeedForwardConformer(d_model, d_ff=d_model*4, dropout=dropout)
+
+        self.dropout_1 = nn.Dropout(dropout)
+        self.dropout_2 = nn.Dropout(dropout)
+
+    def forward(self, x, pe, mask):
+        x = x + 0.5 * self.ff_1(x)
+        res = x
+        x = self.norm(x)
+        x, attn_enc_enc = self.attn(x,x,x,pe,mask)
+        x = res + self.dropout_1(x)
+        x = x + self.conv_module(x)
+        x = x + self.dropout_2(self.ff_2(x))
         return x, attn_enc_enc

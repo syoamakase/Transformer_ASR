@@ -4,6 +4,7 @@ import os
 import sys
 import time
 
+import copy
 import random
 import numpy as np
 
@@ -21,7 +22,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
 from utils import hparams as hp
-from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight
+from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight, frame_stacking
 from Models.transformer import Transformer
 
 random.seed(77)
@@ -30,9 +31,9 @@ torch.cuda.manual_seed_all(777)
 np.random.seed(777)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def get_learning_rate(step):
-    warmup_step = 25000 #hp.warmup_step # 4000
-    warmup_factor = 5.0 #hp.warmup_factor #10.0 # 1.0
+def get_learning_rate(step, hp):
+    warmup_step = hp.warmup_step #hp.warmup_step # 4000
+    warmup_factor = hp.warmup_factor #hp.warmup_factor #10.0 # 1.0
     d_model = 256
     return warmup_factor * min(step ** -0.5, step * warmup_step ** -1.5) * (d_model ** -0.5)
 
@@ -40,10 +41,10 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
     scaler = torch.cuda.amp.GradScaler()
     src_pad = 0
     trg_pad = 0
-    if step > hp.warmup_step:
-        train_dataset = datasets.get_dataset(hp.train_script, hp.spm_model, hp, spec_aug=hp.use_spec_aug, feat_norm=[hp.mean_file, hp.var_file])
+    if step // hp.accum_grad > hp.warmup_step:
+        train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=hp.use_spec_aug, feat_norm=[hp.mean_file, hp.var_file])
     else:
-        train_dataset = datasets.get_dataset(hp.train_script, hp.spm_model, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
+        train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
 
     collate_fn_transformer = datasets.collate_fn
     if hp.batch_size is not None:
@@ -52,18 +53,19 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
 
     train_sampler = datasets.DistributedSamplerWrapper(sampler) if args.n_gpus > 1 else sampler
-    dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4, collate_fn=collate_fn_transformer)
+    dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=2, collate_fn=collate_fn_transformer)
 
     train_len = len(dataloader)
     local_time = time.time()
     device = f'cuda:{rank}'
     label_smoothing = True
+    if hp.optimizer_type == 'Noam':
+        lr = get_learning_rate(step//hp.accum_grad+1, hp)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
+    optimizer.zero_grad()
     for d in dataloader:
-        if hp.optimizer_type == 'Noam':
-            lr = get_learning_rate(step)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
- 
         text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
 
         text = text.to(device, non_blocking=True)
@@ -72,6 +74,9 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         pos_mel = pos_mel.to(device, non_blocking=True)
         text_lengths = text_lengths.to(device, non_blocking=True)
     
+        if hp.frame_stacking > 1:
+            mel_input, pos_mel = frame_stacking(mel_input, pos_mel, hp.frame_stacking)
+
         batch_size = mel_input.shape[0]
     
         text_input = text[:, :-1]
@@ -80,7 +85,6 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         print(f'load {time.time() - local_time}')
         local_time = time.time()
     
-        optimizer.zero_grad()
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             dist.barrier()
             if hp.mode == 'ctc-transformer':
@@ -94,12 +98,12 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
             loss_att = 0.0
             # cross entropy
             if label_smoothing:
-                ys = text[:, 1:].contiguous().view(-1)
+                ys = text[:, 1:].contiguous().view(-1, 1)
                 B, T, L = youtputs.shape
-                eps = 0.1
+                #eps = 0.1
                 log_prob = F.log_softmax(youtputs, dim=2)
-                onehot = torch.zeros((B * T, L), dtype=torch.float).to(DEVICE).scatter_(1, ys.reshape(-1, 1), 1)
-                onehot = onehot * (1 - eps) + (1 - onehot) * eps / (youtputs.size(2) - 1)
+                onehot = torch.zeros((B * T, L), dtype=torch.float).to(DEVICE).scatter_(1, ys, 1)
+                onehot = onehot * (1 - 0.1) + (1 - onehot) * 0.1 / (youtputs.size(2) - 1)
                 onehot = onehot.reshape(B, T, L)
                 for i, t in enumerate(text_lengths):
                     if hp.T_norm:
@@ -119,7 +123,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
             print('loss_att =', loss_att.item())
             if hp.mode == 'ctc-transformer':
                 predict_ts_ctc = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
-                mel_lengths_downsample = mel_lengths // 4 - 1
+                mel_lengths_downsample = mel_lengths // hp.subsampling_rate - 1
                 loss_ctc = F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0)
                 print('loss_ctc = {}'.format(loss_ctc.item()))
                 loss = (hp.mlt_weight * loss_att + (1 - hp.mlt_weight) * loss_ctc) / hp.accum_grad
@@ -128,21 +132,37 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
             print('loss =', loss.item())
         if not torch.isnan(loss):
             if hp.amp:
+                loss /= hp.accum_grad
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
-                scaler.step(optimizer)
-                scaler.update()
+                #scaler.unscale_(optimizer)
+                #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
+                #scaler.step(optimizer)
+                #scaler.update()
                 print(f'backward {time.time() - local_time}')
                 local_time = time.time()
+                if step % hp.accum_grad == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    print(f'step {time.time() - local_time}')
+                    local_time = time.time()
             else:
+                loss /= hp.accum_grad
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
-                optimizer.step()
+                if step % hp.accum_grad == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
+                    optimizer.step()
+
+            if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
+                lr = get_learning_rate(step//hp.accum_grad+1, hp)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
         else:
             print('loss is nan')
             sys.exit(1)
-
+        if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
+            optimizer.zero_grad()
         sys.stdout.flush()
         # calc
     n_correct = 0
@@ -233,7 +253,7 @@ def run_training(rank, args, hp):
             start_epoch = 0
             print('flat_start')
         else:
-            train_dataset = datasets.get_dataset(hp.train_script, hp.spm_model, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
+            train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
             collate_fn_transformer = datasets.collate_fn
             if hp.batch_size is not None:
                 sampler = datasets.NumBatchSampler(train_dataset, hp.batch_size)

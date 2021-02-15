@@ -6,9 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from Models.modules import CNN_embedding
-from Models.encoder import Encoder#, ConformerEncoder
+from Models.encoder import Encoder, ConformerEncoder
 from Models.decoder import Decoder
-from utils.utils import npeak_mask
+from utils.utils import npeak_mask, frame_stacking
 
 class Transformer(nn.Module):
     def __init__(self, hp):
@@ -18,8 +18,13 @@ class Transformer(nn.Module):
         self.trg_vocab = hp.vocab_size
         self.encoder = hp.encoder
         self.mode = hp.mode
+        self.frame_stacking = True if hp.frame_stacking > 1 else False
 
-        self.cnn_encoder = CNN_embedding(hp)
+        if not self.frame_stacking:
+            self.cnn_encoder = CNN_embedding(hp)
+        else:
+            self.embedder = nn.Linear(hp.mel_dim*hp.frame_stacking, self.d_model_e)
+
         if hp.encoder == 'Conformer':
             self.encoder = ConformerEncoder(hp)
         else:
@@ -30,7 +35,11 @@ class Transformer(nn.Module):
             self.out_ctc = nn.Linear(self.d_model_e, self.trg_vocab)
 
     def forward(self, src, trg, src_mask, trg_mask):
-        src, src_mask = self.cnn_encoder(src, src_mask)
+        if not self.frame_stacking:
+            src, src_mask = self.cnn_encoder(src, src_mask)
+        else:
+            src = self.embedder(src)
+
         e_outputs, attn_enc_enc = self.encoder(src, src_mask)
         d_output, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs, src_mask, trg_mask)
         outputs = self.out(d_output)
@@ -41,10 +50,16 @@ class Transformer(nn.Module):
         return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc
 
     def decode(self, src, src_dummy, beam_size=10, model_lm=None, init_tok=2, eos_tok=1):
-        max_len = 200
-        src_mask = (src_dummy != 0).unsqueeze(-2)
+        max_len = 300
 
-        src, src_mask = self.cnn_encoder(src, src_mask)
+        if not self.frame_stacking:
+            src_mask = (src_dummy != 0).unsqueeze(-2)
+            src, src_mask = self.cnn_encoder(src, src_mask)
+        else:
+            src_mask = (src_dummy != 0)
+            src, src_mask = frame_stacking(src, src_mask, 3)
+            src = self.embedder(src)
+
         e_output, _ = self.encoder(src, src_mask)
         if hasattr(self, 'linear'):
             e_outputs = self.linear(e_outputs)
@@ -68,7 +83,6 @@ class Transformer(nn.Module):
                         'result':torch.zeros((beam_size, max_len), device=src.device, dtype=torch.long),
                         'length':torch.zeros(beam_size).long()}
 
-
         beam_step = 0
         end_beam = False
         for i in range(2, max_len):
@@ -81,7 +95,7 @@ class Transformer(nn.Module):
 
             asr_score = F.log_softmax(out[:, -1], dim=1).data
             if model_lm is not None:
-                lm_score = F.log_softmax(model_lm(outputs[:, :i], dim=2))[:, -1]
+                lm_score = F.log_softmax(model_lm(outputs[:, :i]), dim=2)[:, -1]
             else:
                 lm_score = 0
 
@@ -111,7 +125,6 @@ class Transformer(nn.Module):
                     beam_step += 1
                     if kk == 0:
                         end_beam = True
-
                         break
 
                     if beam_step == beam_size:
