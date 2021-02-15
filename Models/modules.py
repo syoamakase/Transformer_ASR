@@ -63,7 +63,6 @@ class CNN_embedding(nn.Module):
             #    self.conv[i+1].bias.data.fill_(0)
             hidden_dim = (hidden_dim - 1) // 2
         hidden_dim *= cnn_dim
-        print(hidden_dim)
         self.out = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, x, x_mask):

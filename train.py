@@ -82,8 +82,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         text_input = text[:, :-1]
         src_mask, trg_mask = create_masks(pos_mel, pos_text[:, :-1])
 
-        print(f'load {time.time() - local_time}')
-        local_time = time.time()
+        #print(f'load {time.time() - local_time}')
+        #local_time = time.time()
     
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             dist.barrier()
@@ -92,8 +92,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
             else:
                 youtputs = model(mel_input, text_input, src_mask, trg_mask)
     
-            print(f'forward {time.time() - local_time}')
-            local_time = time.time()
+            #print(f'forward {time.time() - local_time}')
+            #local_time = time.time()
 
             loss_att = 0.0
             # cross entropy
@@ -138,15 +138,15 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
                 #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
                 #scaler.step(optimizer)
                 #scaler.update()
-                print(f'backward {time.time() - local_time}')
-                local_time = time.time()
+                #print(f'backward {time.time() - local_time}')
+                #local_time = time.time()
                 if step % hp.accum_grad == 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
                     scaler.step(optimizer)
                     scaler.update()
-                    print(f'step {time.time() - local_time}')
-                    local_time = time.time()
+                    #print(f'step {time.time() - local_time}')
+                    #local_time = time.time()
             else:
                 loss /= hp.accum_grad
                 loss.backward()
