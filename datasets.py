@@ -276,12 +276,14 @@ class LengthsBatchSampler(Sampler):
         if not self.shuffle_all:
             while self.count + 1 < len(self.lengths_np):
                 indices = []
-                mel_lengths = 0
+                max_len = 0
                 while self.count < len(self.lengths_np):
                     curr_len = self.lengths_np[self.count]
+                    mel_lengths = max(max_len, curr_len) * (len(indices) + 1)
                     if mel_lengths + curr_len > self.n_lengths or (self.count + 1) > len(self.lengths_np):
                         break
-                    mel_lengths += curr_len
+                    #mel_lengths += curr_len
+                    max_len = max(max_len, curr_len)
                     indices.extend([self.count])
                     self.count += 1
                 all_indices.append(indices)
