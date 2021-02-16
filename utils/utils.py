@@ -64,11 +64,11 @@ def onehot(labels, num_output):
     return utt_label
 
 
-def load_model(model_file):
+def load_model(model_file, map_location=DEVICE):
     """
     To load PyTorch models either of single-gpu and multi-gpu based model
     """
-    model_state = torch.load(model_file)
+    model_state = torch.load(model_file, map_location=map_location)
     is_multi_loading = True if torch.cuda.device_count() > 1 else False
     # This line may include bugs!!
     is_multi_loaded = True if 'module' in list(model_state.keys())[0] else False

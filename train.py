@@ -243,11 +243,16 @@ def run_training(rank, args, hp):
     
     assert (hp.batch_size is None) != (hp.max_seqlen is None)
 
+    if args.n_gpus > 1:
+        dist.barrier()
+        # configure map_location properly
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+
     if hp.loaded_epoch is not None:
         start_epoch = hp.loaded_epoch
         load_dir = hp.loaded_dir
         print('epoch {} loaded'.format(hp.loaded_epoch))
-        loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))))
+        loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
         model.load_state_dict(loaded_dict)
         if hp.is_flat_start:
             step = 1
@@ -262,7 +267,7 @@ def run_training(rank, args, hp):
             #    sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
             #train_sampler = DistributedSampler(sampler) if args.n_gpus > 1 else sampler
             #dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4, collate_fn=collate_fn_transformer)
-            loaded_dict = torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch))))
+            loaded_dict = torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
             optimizer.load_state_dict(loaded_dict)
             step = loaded_dict['state'][0]['step'] #hp.loaded_epoch * len(dataloader)
             del loaded_dict
