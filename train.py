@@ -86,7 +86,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         #local_time = time.time()
     
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
-            dist.barrier()
+            if args.n_gpus > 1:
+                dist.barrier()
             if hp.mode == 'ctc-transformer':
                 youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask)
             else:
@@ -184,7 +185,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         torch.save(optimizer.state_dict(), hp.save_dir+"/network.optimizer.epoch{}".format(epoch+1))
         print('save optimizer')
 
-    dist.barrier()
+    if args.n_gpus > 1:
+        dist.barrier()
     return step
 
 def train_epoch(model, optimizer, args, hp, step, start_epoch=0, rank=0):
@@ -241,7 +243,6 @@ def run_training(rank, args, hp):
     
     assert (hp.batch_size is None) != (hp.max_seqlen is None)
 
-    
     if hp.loaded_epoch is not None:
         start_epoch = hp.loaded_epoch
         load_dir = hp.loaded_dir
@@ -253,17 +254,17 @@ def run_training(rank, args, hp):
             start_epoch = 0
             print('flat_start')
         else:
-            train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
-            collate_fn_transformer = datasets.collate_fn
-            if hp.batch_size is not None:
-                sampler = datasets.NumBatchSampler(train_dataset, hp.batch_size)
-            elif hp.max_seqlen is not None:
-                sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
-            train_sampler = DistributedSampler(sampler) if args.n_gpus > 1 else sampler
-            dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4, collate_fn=collate_fn_transformer)
+            #train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
+            #collate_fn_transformer = datasets.collate_fn
+            #if hp.batch_size is not None:
+            #    sampler = datasets.NumBatchSampler(train_dataset, hp.batch_size)
+            #elif hp.max_seqlen is not None:
+            #    sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
+            #train_sampler = DistributedSampler(sampler) if args.n_gpus > 1 else sampler
+            #dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4, collate_fn=collate_fn_transformer)
             loaded_dict = torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch))))
             optimizer.load_state_dict(loaded_dict)
-            step = hp.loaded_epoch * len(dataloader)
+            step = loaded_dict['state'][0]['step'] #hp.loaded_epoch * len(dataloader)
             del loaded_dict
             torch.cuda.empty_cache()
     else:
