@@ -280,7 +280,7 @@ class LengthsBatchSampler(Sampler):
                 while self.count < len(self.lengths_np):
                     curr_len = self.lengths_np[self.count]
                     mel_lengths = max(max_len, curr_len) * (len(indices) + 1)
-                    if mel_lengths + curr_len > self.n_lengths or (self.count + 1) > len(self.lengths_np):
+                    if mel_lengths > self.n_lengths or (self.count + 1) > len(self.lengths_np):
                         break
                     #mel_lengths += curr_len
                     max_len = max(max_len, curr_len)
@@ -298,7 +298,7 @@ class LengthsBatchSampler(Sampler):
                     idx_rand = rand_range[self.count] 
                     curr_len = self.lengths_np[self.count]
                     mel_lengths = max(max_len, curr_len) * (len(indices) + 1)
-                    if mel_lengths + curr_len > self.n_lengths or (self.count + 1) > len(self.lengths_np):
+                    if mel_lengths > self.n_lengths or (self.count + 1) > len(self.lengths_np):
                         break
                     # mel_lengths += curr_len
                     max_len = max(max_len, curr_len)
