@@ -15,22 +15,10 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 from utils import hparams as hp
-from utils.utils import fill_variables
+from utils.utils import fill_variables, load_dat
 from Models.transformer import Transformer
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-def load_dat(filename):
-    fh = open(filename, "rb")
-    spam = fh.read(12)
-    nSamples, sampPeriod, sampSize, parmKind = unpack(">IIHH", spam)
-    veclen = int(sampSize / 4)
-    fh.seek(12, 0)
-    dat = np.fromfile(fh, dtype=np.float32)
-    dat = dat.reshape(int(len(dat) / veclen), veclen)
-    dat = dat.byteswap()
-    fh.close()
-    return dat
 
 def load_model(model_file):
     model_state = torch.load(model_file)
@@ -101,7 +89,7 @@ if __name__ == '__main__':
         hp_file = os.path.join(model_path, 'hparams.py')
     
     hp.configure(hp_file)
-    fill_variables()
+    fill_variables(hp)
     
     sp = spm.SentencePieceProcessor()
     sp.Load(hp.spm_model)
