@@ -79,12 +79,18 @@ class TrainDatasets(Dataset):
         num_mel_channels = cloned.shape[1]
         for i in range(0, num_masks):
             f = random.randrange(0, F, granularity)
-            f_zero = random.randrange(0, num_mel_channels - f)
-            # avoids randrange error if values are equal and range is empty
-            if (f_zero == f_zero + f*granularity): return cloned
-            mask_end = random.randrange(f_zero, f_zero + f, granularity)
-            if (replace_with_zero): cloned[:, f_zero:mask_end] = 0
-            else: cloned[:, f_zero:mask_end] = cloned.mean()
+            if random_mask:
+                sample = np.arange(0, num_mel_channels)
+                masks = random.sample(list(sample), f)
+                if (replace_with_zero): cloned[:, masks] = 0
+                else: cloned[:, masks] = cloned.mean()
+            else:
+                f_zero = random.randrange(0, num_mel_channels - f)
+                # avoids randrange error if values are equal and range is empty
+                if (f_zero == f_zero + f*granularity): return cloned
+                mask_end = random.randrange(f_zero, f_zero + f, granularity)
+                if (replace_with_zero): cloned[:, f_zero:mask_end] = 0
+                else: cloned[:, f_zero:mask_end] = cloned.mean()
         return cloned
     
     def _time_mask(self, spec, T=50, num_masks=1, replace_with_zero=False, random_mask=False):
@@ -130,7 +136,7 @@ class TrainDatasets(Dataset):
             #T = min(mel_input.shape[0] // 2 - 1, 100)
             #mel_input = time_warp(self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2,replace_with_zero=True))
             #mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2, replace_with_zero=True)
-            mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
+            mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True, random_mask=self.hp.random_mask, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
             mel_length = mel_input.shape[0]
         # mel_input = np.concatenate([np.zeros([1,self.hp.num_mels], np.float32), mel[:-1,:]], axis=0)
         text_length = len(text)                                                 
