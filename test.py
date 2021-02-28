@@ -16,7 +16,9 @@ import torch.nn as nn
 
 from utils import hparams as hp
 from utils.utils import fill_variables, load_dat
+import utils
 from Models.transformer import Transformer
+from Models.LM import Model_lm
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -79,17 +81,21 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load_name')
     parser.add_argument('--hp_file', type=str, default=None)
+    parser.add_argument('--test_script', type=str, default=None)
+    parser.add_argument('--load_name_lm', type=str, default=None)
+    parser.add_argument('--lm_weight', type=float, default=0.2)
+    parser.add_argument('--log_params', action='store_true')
     args = parser.parse_args()
     hp_file = args.hp_file
     model_name = args.load_name # save dir name
     
-    model_path  = os.path.dirname(model_name)
+    model_path = os.path.dirname(model_name)
     
     if hp_file is None:
         hp_file = os.path.join(model_path, 'hparams.py')
     
     hp.configure(hp_file)
-    fill_variables(hp)
+    fill_variables(hp, args.log_params)
     
     sp = spm.SentencePieceProcessor()
     sp.Load(hp.spm_model)
@@ -105,6 +111,16 @@ if __name__ == '__main__':
     model.to(DEVICE)
     model.eval()
     
+    if args.load_name_lm is not None:
+        hp_LM_path = os.path.join(os.path.dirname(args.load_name_lm), 'hparams.py')
+        hp_LM = utils.HParams()
+        hp_LM.configure(hp_LM_path)
+        model_lm = Model_lm(hp_LM)
+        model_lm.to(DEVICE)
+        model_lm.load_state_dict(load_model(args.load_name_lm))
+        model_lm.eval()
+    else:
+        model_lm = None
     # load
     model.load_state_dict(load_model(model_name))
     
@@ -148,7 +164,7 @@ if __name__ == '__main__':
     
         src_seq = torch.from_numpy(src_seq).to(DEVICE).float()
         src_seq_dummy = torch.from_numpy(src_seq_dummy).to(DEVICE).long()
-        youtput_in_Variable = model.decode(src_seq, src_seq_dummy, 10, None, INIT_TOK, EOS_TOK)
+        youtput_in_Variable = model.decode(src_seq, src_seq_dummy, 10, model_lm, INIT_TOK, EOS_TOK, args.lm_weight)
         #Beam_cnn_v2.beam_search(src_seq, src_seq_dummy, model, INIT_TOK, EOS_TOK)
         if len(youtput_in_Variable) == 0:
             print("{}".format(x_file.strip()))
