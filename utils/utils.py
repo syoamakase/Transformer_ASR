@@ -164,7 +164,8 @@ def fill_variables(hp):
                     'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':'', 'granularity':1, 'subsampling_rate': 4, 'frame_stacking':1, 'decoder_rel_pos':False, 'random_mask':False, 'decoder': 'Transformer'}
     for key, value in default_var.items():
         if not hasattr(hp, key):
-            print('{} is not found in hparams. defalut {} is used.'.format(key, value))
+            if verbose:
+                print('{} is not found in hparams. defalut {} is used.'.format(key, value))
             setattr(hp, key, value)
 
 def decode_ids(spm_model, text_seq):

@@ -59,11 +59,12 @@ class LSTMDecoder(nn.Module):
         self.L_yy = nn.Linear(self.num_decoder_hidden_nodes, self.num_classes)
 
         self.L_ys = nn.Embedding(self.num_classes, self.num_decoder_hidden_nodes * 4)
+        #self.L_ys = nn.Linear(self.num_classes, self.num_decoder_hidden_nodes * 4 , bias=False)
         self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes * 4, bias=False)
         self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes * 4)
 
-    #def forward(self, hbatch, lengths, targets):
-    def forward(self, targets, hbatch, src_mask, trg_mask):
+
+    def forward(self, hbatch, lengths, targets):
         device = hbatch.device
         batch_size = hbatch.size(0)
         num_frames = hbatch.size(1)
@@ -75,9 +76,6 @@ class LSTMDecoder(nn.Module):
         youtput = torch.zeros((batch_size, num_labels, self.num_classes), requires_grad=False).to(device, non_blocking=True)
         alpha = torch.zeros((batch_size, 1, num_frames), requires_grad=False).to(device, non_blocking=True)
 
-        #for i, tmp in enumerate(lengths):
-        #    if tmp < num_frames:
-        #        e_mask.data[i, tmp:] = 0.0
         e_mask[src_mask.transpose(1,2) is False] = 0.0
 
         for step in range(num_labels):
@@ -89,9 +87,9 @@ class LSTMDecoder(nn.Module):
             s, c = self._func_lstm(rec_input, c)
 
             youtput[:, step] = y
-        return youtput, None, None
+        return youtput
     
-    def decode_v2(self, hbatch, src_mask, model_lm=None):
+    def decode_v2(self, hbatch, lengths, model_lm=None):
         """
         decode function with a few modification.
         1. Add the candidate when the prediction is </s>
@@ -120,7 +118,6 @@ class LSTMDecoder(nn.Module):
         beam_step = 0
 
         e_mask[src_mask.transpose(1,2) is False] = 0.0
-        
         for seq_step in range(self.hp.max_decoder_seq_len):
             # length_penalty = ((5 + seq_step + 1)**0.9 / (5 + 1)**0.9)
             cand_seq = copy.deepcopy(beam_search['result'])

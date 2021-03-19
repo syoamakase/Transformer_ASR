@@ -40,6 +40,14 @@ def load_model(model_file):
     elif is_multi_loaded is True and is_multi_loading is False:
         new_model_state = {}
         for key in model_state.keys():
+            #if 'cnn_encoder.conv.2' in key:
+            #    new_key = key.replace('cnn_encoder.conv.2', 'cnn_encoder.conv.1')
+            #    new_model_state[new_key[7:]] = model_state[key]       
+            #elif 'cnn_encoder.out.0' in key:
+            #    new_key = key.replace('cnn_encoder.out.0', 'cnn_encoder.out')
+            #    new_model_state[new_key[7:]] = model_state[key]       
+            #else:
+            #    new_model_state[key[7:]] = model_state[key]
             new_model_state[key[7:]] = model_state[key]
 
         return new_model_state
