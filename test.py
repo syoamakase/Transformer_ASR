@@ -95,7 +95,7 @@ if __name__ == '__main__':
         hp_file = os.path.join(model_path, 'hparams.py')
     
     hp.configure(hp_file)
-    fill_variables(hp, args.log_params)
+    fill_variables(hp) #args.log_params)
     
     sp = spm.SentencePieceProcessor()
     sp.Load(hp.spm_model)

@@ -53,7 +53,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
         sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
 
     train_sampler = datasets.DistributedSamplerWrapper(sampler) if args.n_gpus > 1 else sampler
-    dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=2, collate_fn=collate_fn_transformer)
+    dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=8, collate_fn=collate_fn_transformer)
 
     train_len = len(dataloader)
     local_time = time.time()

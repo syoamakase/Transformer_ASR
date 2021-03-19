@@ -136,7 +136,7 @@ class TrainDatasets(Dataset):
             #T = min(mel_input.shape[0] // 2 - 1, 100)
             #mel_input = time_warp(self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2,replace_with_zero=True))
             #mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2, replace_with_zero=True)
-            mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True, random_mask=self.hp.random_mask, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
+            mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=self.hp.num_F, replace_with_zero=True, random_mask=self.hp.random_mask, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
             mel_length = mel_input.shape[0]
         # mel_input = np.concatenate([np.zeros([1,self.hp.num_mels], np.float32), mel[:-1,:]], axis=0)
         text_length = len(text)                                                 

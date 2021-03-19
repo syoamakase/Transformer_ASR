@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from Models.modules import CNN_embedding
 from Models.encoder import Encoder, ConformerEncoder
-from Models.decoder import Decoder
+from Models.decoder import Decoder, LSTMDecoder
 from utils.utils import npeak_mask, frame_stacking
 
 class Transformer(nn.Module):
@@ -16,7 +16,8 @@ class Transformer(nn.Module):
         self.d_model_e = hp.d_model_e
         self.d_model_d = hp.d_model_d
         self.trg_vocab = hp.vocab_size
-        self.encoder = hp.encoder
+        self.encoder_type = hp.encoder
+        self.decoder_type = hp.decoder
         self.mode = hp.mode
         self.frame_stacking = True if hp.frame_stacking > 1 else False
 
@@ -25,12 +26,16 @@ class Transformer(nn.Module):
         else:
             self.embedder = nn.Linear(hp.mel_dim*hp.frame_stacking, self.d_model_e)
 
-        if hp.encoder == 'Conformer':
+        if self.encoder_type == 'Conformer':
             self.encoder = ConformerEncoder(hp)
         else:
             self.encoder = Encoder(hp)
-        self.decoder = Decoder(hp)
-        self.out = nn.Linear(self.d_model_d, self.trg_vocab)
+        if self.decoder_type.lower() == 'transformer':
+            self.decoder = Decoder(hp)
+            self.out = nn.Linear(self.d_model_d, self.trg_vocab)
+        else:
+            self.decoder = LSTMDecoder(hp)
+
         if self.mode == 'ctc-transformer':
             self.out_ctc = nn.Linear(self.d_model_e, self.trg_vocab)
 
@@ -42,15 +47,18 @@ class Transformer(nn.Module):
 
         e_outputs, attn_enc_enc = self.encoder(src, src_mask)
         d_output, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs, src_mask, trg_mask)
-        outputs = self.out(d_output)
+        if self.decoder_type.lower() == 'transformer':
+            outputs = self.out(d_output)
+        else:
+            outputs = d_output
+
         if self.mode == 'ctc-transformer':
             ctc_outputs = self.out_ctc(e_outputs)
         else:
             ctc_outputs = None
         return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc
 
-    def decode(self, src, src_dummy, beam_size=10, model_lm=None, init_tok=2, eos_tok=1):
-        max_len = 300
+    def decode(self, src, src_dummy, beam_size=10, model_lm=None, init_tok=2, eos_tok=1, lm_weight=0.0):
 
         if not self.frame_stacking:
             src_mask = (src_dummy != 0).unsqueeze(-2)
@@ -61,26 +69,38 @@ class Transformer(nn.Module):
             src = self.embedder(src)
 
         e_output, _ = self.encoder(src, src_mask)
+
+        if self.decoder_type.lower() == 'transformer':
+            results = self._decode_tranformer_decoder(e_output, src_mask, beam_size, model_lm, init_tok, eos_tok, lm_weight)
+        else:
+            results = self.decoder.decode_v2(e_output, src_mask, model_lm)
+            # decode_v2(self, hbatch, lengths, model_lm=None):
+
+        return results
+
+    def _decode_tranformer_decoder(self, e_output, src_mask, beam_size, model_lm, init_tok, eos_tok, lm_weight):
+        max_len = 300
         if hasattr(self, 'linear'):
             e_outputs = self.linear(e_outputs)
     
+        device = e_output.device
         outputs = torch.LongTensor([[init_tok]])
         trg_mask = npeak_mask(1)
 
-        out = self.out(self.decoder(outputs.to(src.device), e_output, src_mask, trg_mask)[0])
+        out = self.out(self.decoder(outputs.to(device), e_output, src_mask, trg_mask)[0])
 
         out = F.softmax(out, dim=-1)
         probs, ix = out[:, -1].data.topk(beam_size)
         log_scores = torch.Tensor([torch.log(prob) for prob in probs.data[0]]).unsqueeze(0)
 
-        outputs = torch.zeros((beam_size, max_len), device=src.device).long()
+        outputs = torch.zeros((beam_size, max_len), device=device).long()
         outputs[:, 0] = init_tok
         outputs[:, 1] = ix[0]
-        e_outputs = torch.zeros((beam_size, e_output.size(-2), e_output.size(-1)), device=src.device)
+        e_outputs = torch.zeros((beam_size, e_output.size(-2), e_output.size(-1)), device=device)
         e_outputs[:, :] = e_output[0]
 
-        beam_results = {'score': torch.zeros((beam_size),device=src.device, dtype=torch.float).fill_(-100),
-                        'result':torch.zeros((beam_size, max_len), device=src.device, dtype=torch.long),
+        beam_results = {'score': torch.zeros((beam_size),device=device, dtype=torch.float).fill_(-100),
+                        'result':torch.zeros((beam_size, max_len), device=device, dtype=torch.long),
                         'length':torch.zeros(beam_size).long()}
 
         beam_step = 0
@@ -91,7 +111,7 @@ class Transformer(nn.Module):
             e_outputs_ = e_outputs[:batch_size]
             src_mask_ = src_mask[:batch_size]
 
-            out = self.out(self.decoder(outputs[:, :i].to(src.device), e_outputs_, src_mask_, trg_mask)[0])
+            out = self.out(self.decoder(outputs[:, :i].to(device), e_outputs_, src_mask_, trg_mask)[0])
 
             asr_score = F.log_softmax(out[:, -1], dim=1).data
             if model_lm is not None:
@@ -109,7 +129,7 @@ class Transformer(nn.Module):
             k_probs, k_ix = log_probs.reshape(-1).topk(beam_size)
             row = k_ix // batch_size
             col = k_ix % batch_size
-            outputs_new = torch.zeros((beam_size, i+1)).long().to(src.device)
+            outputs_new = torch.zeros((beam_size, i+1)).long().to(device)
             outputs_new[:, :i] = outputs[row, :i]
             outputs_new[:, i] = ix[row, col]
             log_scores = k_probs.unsqueeze(0)
@@ -135,7 +155,7 @@ class Transformer(nn.Module):
                     outputs_new.append(outputs[kk,:i+2].cpu().numpy())
                     log_scores_new.append(log_scores[0][kk].item())
 
-            outputs = torch.tensor(outputs_new).long().to(src.device)
+            outputs = torch.tensor(outputs_new).long().to(device)
             log_scores = torch.tensor(log_scores_new).float().unsqueeze(0)
 
             if beam_step == 20 or end_beam or outputs.shape[0] < 5:
