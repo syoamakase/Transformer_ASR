@@ -59,22 +59,22 @@ class Transformer(nn.Module):
         return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc
 
     def decode(self, src, src_dummy, beam_size=10, model_lm=None, init_tok=2, eos_tok=1, lm_weight=0.0):
+        with torch.no_grad():
+            if not self.frame_stacking:
+                src_mask = (src_dummy != 0).unsqueeze(-2)
+                src, src_mask = self.cnn_encoder(src, src_mask)
+            else:
+                src_mask = (src_dummy != 0)
+                src, src_mask = frame_stacking(src, src_mask, 3)
+                src = self.embedder(src)
 
-        if not self.frame_stacking:
-            src_mask = (src_dummy != 0).unsqueeze(-2)
-            src, src_mask = self.cnn_encoder(src, src_mask)
-        else:
-            src_mask = (src_dummy != 0)
-            src, src_mask = frame_stacking(src, src_mask, 3)
-            src = self.embedder(src)
+            e_output, _ = self.encoder(src, src_mask)
 
-        e_output, _ = self.encoder(src, src_mask)
-
-        if self.decoder_type.lower() == 'transformer':
-            results = self._decode_tranformer_decoder(e_output, src_mask, beam_size, model_lm, init_tok, eos_tok, lm_weight)
-        else:
-            results = self.decoder.decode_v2(e_output, src_mask, model_lm)
-            # decode_v2(self, hbatch, lengths, model_lm=None):
+            if self.decoder_type.lower() == 'transformer':
+                results = self._decode_tranformer_decoder(e_output, src_mask, beam_size, model_lm, init_tok, eos_tok, lm_weight)
+            else:
+                results = self.decoder.decode_v2(e_output, src_mask, model_lm)
+                # decode_v2(self, hbatch, lengths, model_lm=None):
 
         return results
 

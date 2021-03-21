@@ -133,7 +133,6 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank):
             print('loss =', loss.item())
         if not torch.isnan(loss):
             if hp.amp:
-                loss /= hp.accum_grad
                 scaler.scale(loss).backward()
                 #scaler.unscale_(optimizer)
                 #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)

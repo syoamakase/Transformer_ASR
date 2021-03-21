@@ -40,14 +40,15 @@ class ConformerEncoder(nn.Module):
         xscale = 1 #math.sqrt(d_model)
         self.pe = RelativePositionalEncoder(d_model, xscale=xscale, dropout=dropout)
         self.layers = repeat(self.N, lambda: ConformerEncoderLayer(d_model, self.heads, dropout))
-        self.norm = nn.LayerNorm(d_model)
+        self.norm_1 = nn.LayerNorm(d_model)
+        self.norm_2 = nn.LayerNorm(d_model)
 
     def forward(self, src, mask):
         x, pe = self.pe(src)
         b, t, _ = x.shape
         attns_enc = torch.zeros((b, self.N, self.heads, t, t), device=x.device)
-        del src
+        x = self.norm_1(x)
         for i in range(self.N):
             x, attn_enc = self.layers[i](x, pe, mask)
             attns_enc[:,i] = attn_enc.detach()
-        return self.norm(x), attns_enc
+        return self.norm_2(x), attns_enc

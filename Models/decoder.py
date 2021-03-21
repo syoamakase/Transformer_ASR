@@ -1,4 +1,5 @@
 #-*- coding: utf-8 -*-
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -64,7 +65,7 @@ class LSTMDecoder(nn.Module):
         self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes * 4)
 
 
-    def forward(self, hbatch, lengths, targets):
+    def forward(self, targets, hbatch, src_mask, trg_mask):
         device = hbatch.device
         batch_size = hbatch.size(0)
         num_frames = hbatch.size(1)
@@ -87,9 +88,9 @@ class LSTMDecoder(nn.Module):
             s, c = self._func_lstm(rec_input, c)
 
             youtput[:, step] = y
-        return youtput
+        return youtput, None, None
     
-    def decode_v2(self, hbatch, lengths, model_lm=None):
+    def decode_v2(self, hbatch, src_mask, model_lm=None):
         """
         decode function with a few modification.
         1. Add the candidate when the prediction is </s>
@@ -102,23 +103,28 @@ class LSTMDecoder(nn.Module):
         num_frames = hbatch.shape[1]
         e_mask = torch.ones((batch_size, num_frames, 1), device=device, requires_grad=False)
 
-        beam_width = self.hp.beam_width
-        beam_search = {'result': torch.zeros((beam_width, self.hp.max_decoder_seq_len), device=device, dtype=torch.long),
+        beam_width = 4 #self.hp.beam_width
+        max_decoder_seq_len = 200 #self.hp.max_decoder_seq_len
+        score_func = 'log_softmax'
+        eos_id =1
+
+
+        beam_search = {'result': torch.zeros((beam_width, max_decoder_seq_len), device=device, dtype=torch.long),
                        'length': torch.zeros(beam_width).long(),
                        'score': torch.zeros((beam_width), device=device, dtype=torch.float).fill_(0),
                        'c': torch.zeros((beam_width, self.num_decoder_hidden_nodes), device=device),
                        's': torch.zeros((beam_width, self.num_decoder_hidden_nodes), device=device),
-                       'alpha': torch.zeros((beam_width, self.hp.max_decoder_seq_len, num_frames), device=device)}
+                       'alpha': torch.zeros((beam_width, max_decoder_seq_len, num_frames), device=device)}
 
         beam_results = {'score': torch.zeros((beam_width), device=device, dtype=torch.float).fill_(0),
-                        'result': torch.zeros((beam_width, self.hp.max_decoder_seq_len), device=device, dtype=torch.long),
+                        'result': torch.zeros((beam_width, max_decoder_seq_len), device=device, dtype=torch.long),
                         'length': torch.zeros(beam_width).long(),
-                        'alpha': torch.zeros((beam_width, self.hp.max_decoder_seq_len, num_frames), device=device, requires_grad=False)}
+                        'alpha': torch.zeros((beam_width, max_decoder_seq_len, num_frames), device=device, requires_grad=False)}
 
         beam_step = 0
 
         e_mask[src_mask.transpose(1,2) is False] = 0.0
-        for seq_step in range(self.hp.max_decoder_seq_len):
+        for seq_step in range(max_decoder_seq_len):
             # length_penalty = ((5 + seq_step + 1)**0.9 / (5 + 1)**0.9)
             cand_seq = copy.deepcopy(beam_search['result'])
             cand_score = copy.deepcopy(beam_search['score'].unsqueeze(1))
@@ -132,7 +138,7 @@ class LSTMDecoder(nn.Module):
             # generate
             y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
 
-            if self.hp.score_func == 'log_softmax':
+            if score_func == 'log_softmax':
                 y = F.log_softmax(y, dim=1)
                 if model_lm is not None and seq_step > 0:
                     lm_input = cand_seq[:, :seq_step]
@@ -140,7 +146,7 @@ class LSTMDecoder(nn.Module):
                     tmpy = y + self.hp.lm_weight * F.log_softmax(lm_score, dim=1)
                 else:
                     tmpy = y.clone()
-            elif self.hp.score_func == 'softmax':
+            elif score_func == 'softmax':
                 y = F.softmax(y, dim=1)
                 if model_lm is not None and seq_step:
                     lm_input = cand_seq[:, :seq_step]
@@ -172,11 +178,11 @@ class LSTMDecoder(nn.Module):
 
                 num_cand = 0
                 i_cand = 0
-                tmp_bestidx = torch.zeros((beam_width), dtype=torch.long, device=DEVICE)
-                tmp_g = torch.zeros((beam_width, self.num_decoder_hidden_nodes * 2), dtype=torch.float, device=DEVICE)
+                tmp_bestidx = torch.zeros((beam_width), dtype=torch.long, device=device)
+                tmp_g = torch.zeros((beam_width, self.num_decoder_hidden_nodes), dtype=torch.float, device=device)
 
                 while num_cand < beam_width:
-                    if best_indices[cand_idx[i_cand], cand_ids[i_cand]] == self.hp.eos_id:
+                    if best_indices[cand_idx[i_cand], cand_ids[i_cand]] == eos_id:
                         beam_results['score'][beam_step] = k_scores[i_cand]
                         beam_results['result'][beam_step] = cand_seq[cand_idx[i_cand]]
                         beam_results['result'][beam_step][seq_step] = best_indices[cand_idx[i_cand], cand_ids[i_cand]]
