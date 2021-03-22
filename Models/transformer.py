@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from Models.modules import CNN_embedding
 from Models.encoder import Encoder, ConformerEncoder
-from Models.decoder import Decoder, LSTMDecoder
+from Models.decoder import Decoder#, LSTMDecoder
 from utils.utils import npeak_mask, frame_stacking
 
 class Transformer(nn.Module):

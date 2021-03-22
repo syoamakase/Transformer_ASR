@@ -131,7 +131,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.out = nn.Linear(d_model, d_model)
 
-    def forward(self, q, k, v, pe=None, mask=None):
+    def forward(self, q, k, v, mask=None):
 
         bs = q.size(0)
 
@@ -346,12 +346,12 @@ class RelativePositionalEncoder(nn.Module):
 
         return self.dropout(x), self.dropout(pe)
 
-class Attention(nn.Module):
+class LocationAttention(nn.Module):
     """
     Attention mechanism based on content-based model [Chorowski+, 2015]
     """
     def __init__(self, hp):
-        super(Attention, self).__init__()
+        super(LocationAttention, self).__init__()
         self.num_decoder_hidden_nodes = hp.d_model_d
         self.num_encoder_hidden_nodes = hp.d_model_e
         # attention

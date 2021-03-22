@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from Models.utils import repeat
-from Models.modules import Embedder, PositionalEncoder, RelativePositionalEncoder, Attention
+from Models.modules import Embedder, PositionalEncoder, RelativePositionalEncoder, LocationAttention
 from Models.layers import DecoderLayer
 
 class Decoder(nn.Module):
@@ -53,7 +53,7 @@ class LSTMDecoder(nn.Module):
         self.num_decoder_hidden_nodes = hp.d_model_d #hp.num_hidden_nodes_decoder
         self.num_encoder_hidden_nodes = hp.d_model_e
         self.num_classes = hp.vocab_size
-        self.att = Attention(hp)
+        self.att = LocationAttention(hp)
         # decoder
         self.L_sy = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes, bias=False)
         self.L_gy = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes)
@@ -106,7 +106,7 @@ class LSTMDecoder(nn.Module):
         beam_width = 4 #self.hp.beam_width
         max_decoder_seq_len = 200 #self.hp.max_decoder_seq_len
         score_func = 'log_softmax'
-        eos_id =1
+        eos_id = 1
 
 
         beam_search = {'result': torch.zeros((beam_width, max_decoder_seq_len), device=device, dtype=torch.long),
