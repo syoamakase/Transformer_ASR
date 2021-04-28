@@ -30,6 +30,46 @@ class PositionalEncoder(nn.Module):
             x = x + pe
         return self.dropout(x)
 
+class CNN_embedding_avepool(nn.Module):
+    def __init__(self, hp):
+        super().__init__() 
+        idim = hp.mel_dim
+        out_dim = hp.d_model_e
+        cnn_dim = hp.cnn_dim
+        self.subsampling_rate = hp.subsampling_rate
+
+        self.l1_flag = False
+        if idim != 80:
+            self.l1 = nn.Linear(idim, 80) #cnn_dim)
+            self.l1_flag = True
+            
+        self.conv1 = nn.Conv2d(1, cnn_dim, 3, 1)
+        self.conv2 = nn.Conv2d(cnn_dim, cnn_dim, 3, 1)
+        hidden_dim = (cnn_dim-2) // 2 #(idim-2) // 2
+        hidden_dim = (hidden_dim-2) // 2
+        if self.l1_flag:
+            hidden_dim *= 80
+            print(f'l1 is used for shape {hidden_dim}')
+        else:
+            hidden_dim *= idim
+            print('l1 is NOT used')
+        self.out = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x, x_mask):
+        if self.l1_flag:
+            x = self.l1(x).unsqueeze(1)
+        else:
+            x = x.unsqueeze(1)
+
+        x = F.relu(self.conv1(x))
+        x = F.avg_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv2(x))
+        x = F.avg_pool2d(x, kernel_size=2, stride=2)
+        b, c, t, f = x.size()
+        x = self.out(x.transpose(1, 2).contiguous().view(b, t, c * f))
+        return x, x_mask[:, :, :-3:2][:, :, :-3:2]
+
+
 class CNN_embedding(nn.Module):
     def __init__(self, hp):
         super().__init__()
@@ -78,14 +118,6 @@ class CNN_embedding(nn.Module):
         b, c, t, f = x.size()
         x = self.out(x.transpose(1, 2).contiguous().view(b, t, c*f))
         return x, x_mask
-        #return x, x_mask[:, :, :-2:2][:, :, :-2:2]
-        #x = x.unsqueeze(1)
-        #x = self.conv(x)
-        #b, c, t, f = x.size()
-        #x = self.out(x.transpose(1, 2).contiguous().view(b, t, c*f))
-        #if x_mask is None:
-        #    return x, None
-        #return x, x_mask[:, :, :-2:2][:, :, :-2:2]
 
 class Embedder(nn.Module):
     # copy
@@ -116,14 +148,19 @@ class FeedForward(nn.Module):
         return x
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, heads, d_model, dropout=0.1):
+    def __init__(self, heads, d_model, d_model_q=None, dropout=0.1):
         super().__init__()
 
         self.d_model = d_model
+        if d_model_q is not None:
+            self.d_model_q = d_model_q
+        else:
+            self.d_model_q = d_model
+
         self.d_k = d_model // heads
         self.h = heads
 
-        self.q_linear = nn.Linear(d_model, d_model)
+        self.q_linear = nn.Linear(self.d_model_q, d_model)
        
         self.v_linear = nn.Linear(d_model, d_model)
         self.k_linear = nn.Linear(d_model, d_model)
@@ -155,7 +192,7 @@ class MultiHeadAttention(nn.Module):
 
 def attention(q, k, v, d_k, mask=None, dropout=None):
 
-    scores = torch.matmul(q, k.transpose(-2, -1)) /  math.sqrt(d_k)
+    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
 
     if mask is not None:
         mask = mask.unsqueeze(1)
@@ -179,6 +216,7 @@ class ConvolutionModule(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         self.pointwise_conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_model*2, kernel_size=1)
         self.depth_conv1 = DepthwiseConv(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, padding=padding)
+        #self.depth_conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, stride=1, padding=15, groups=d_model)
         self.batch_norm = nn.BatchNorm1d(d_model)
         self.swish = Swish()
         self.pointwise_conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=1)
@@ -194,10 +232,10 @@ class ConvolutionModule(nn.Module):
         x = self.depth_conv1(x)
         x = self.batch_norm(x)
         x = self.swish(x)
-        x = self.pointwise_conv2(x).transpose(1,2)
+        x = self.pointwise_conv2(x)
         x = self.dropout(x)
 
-        return x
+        return x.transpose(1,2)
 
     def calc_same_padding(self, kernel_size):
         pad = kernel_size // 2

@@ -5,12 +5,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from Models.modules import CNN_embedding
+from Models.modules import CNN_embedding, CNN_embedding_avepool
 from Models.encoder import Encoder, ConformerEncoder
-from Models.decoder import Decoder#, LSTMDecoder
+from Models.decoder import Decoder, LSTMDecoder
 from utils.utils import npeak_mask, frame_stacking
 
 class Transformer(nn.Module):
+    """
+    Transformer ASR model.
+    It means the encoder uses Transformer (Conformer) and the decoder also uses Transformer.
+    Args (from hparams.py):
+        d_model_e (int): model dimension of encoder
+        d_model_d (int): model dimension of decoder
+        vocab_size (int): target vocabulary size
+        encoder (str): encoder architecture (transformer or conformer)
+        decoder (str): decoder architecture (transformer or LSTM (dev))
+        mode (str): outputs type (transformer or ctc-transformer)
+        frame_stacking (int): If 1 (NOT using frame stacking), it uses CNN subsampling
+    """
     def __init__(self, hp):
         super().__init__()
         self.d_model_e = hp.d_model_e
@@ -22,6 +34,10 @@ class Transformer(nn.Module):
         self.frame_stacking = True if hp.frame_stacking > 1 else False
 
         if not self.frame_stacking:
+            if hp.cnn_avepool:
+                self.cnn_encoder = CNN_embedding_avepool(hp)
+            else:
+                self.cnn_encoder = CNN_embedding(hp)
             self.cnn_encoder = CNN_embedding(hp)
         else:
             self.embedder = nn.Linear(hp.mel_dim*hp.frame_stacking, self.d_model_e)
@@ -58,6 +74,7 @@ class Transformer(nn.Module):
             ctc_outputs = None
         return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc
 
+    @torch.no_grad()
     def decode(self, src, src_dummy, beam_size=10, model_lm=None, init_tok=2, eos_tok=1, lm_weight=0.0):
         with torch.no_grad():
             if not self.frame_stacking:
@@ -79,6 +96,22 @@ class Transformer(nn.Module):
         return results
 
     def _decode_tranformer_decoder(self, e_output, src_mask, beam_size, model_lm, init_tok, eos_tok, lm_weight):
+        """
+        Decoding for tranformer decoder
+        Args:
+            e_output (torch.Float.tensor): Encoder outputs (B x T x d_model_e)
+            src_mask (torch.Bool.tensor): If False at the `t`, a time step of t is padding value.
+            beam_width (int, optional): Beam size. Default: 1
+            model_lm (torch.nn.Module, optional): Language model for shallow fusion. If None, shallow fusion is disabled. Default: None
+            init_tok (int, optional): ID of <sos> token. Default: 2
+            eos_tok (int, optional): ID of <eos> token. Default: 1
+            lm_weight (float, optional): Weight of lauguage model in shallow fusion. If 0.0, it is equivalent to disabling shallow fusion
+
+
+        Returns:
+            list: The best result of beam search.
+            int: Lengths of the best result.
+        """
         max_len = 300
         if hasattr(self, 'linear'):
             e_outputs = self.linear(e_outputs)
@@ -119,6 +152,8 @@ class Transformer(nn.Module):
             else:
                 lm_score = 0
 
+            # Length penalty. Please see [Wu+, 2016] https://arxiv.org/abs/1609.08144
+            # In this setting, alpha = 0.9
             lengths_penalty = ((5+i)**0.9 / (5+1)**0.9)
 
             total_score = asr_score + 0.2*lm_score + lengths_penalty

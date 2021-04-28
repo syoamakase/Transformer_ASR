@@ -5,10 +5,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from Models.utils import repeat
-from Models.modules import Embedder, PositionalEncoder, RelativePositionalEncoder, LocationAttention
+from Models.modules import Embedder, PositionalEncoder, RelativePositionalEncoder, LocationAttention, MultiHeadAttention
 from Models.layers import DecoderLayer
 
 class Decoder(nn.Module):
+    """
+    Transformer decoder.
+    Args (from hparams.py):
+        vocab_size (int): vocabulary size
+        d_model_d (int): The dimension of transformer hidden state
+        dropout (float): The dropout rate
+        heads (int): The number of heads of transformer
+        decoder_rel_pos (bool): If True, use Relative positional encoding (future remove)
+    """
     def __init__(self, hp):
         super().__init__()
         vocab_size = hp.vocab_size
@@ -27,6 +36,18 @@ class Decoder(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, trg, e_outputs, src_mask, trg_mask):
+        """
+        Args:
+            trg (torch.Tensor): Target sequence (B x L)
+            e_outouts (torch.Tensor): The encoder outoput (B x T x dim of hidden state encoder)
+            src_mask (torch.Tensor): The mask of encoder (B x T)
+            trg_mask (torch.tensor): The mask of decoder (B x L)
+
+        Returns:
+            torch.tensor: Output of decoder (NOT prediction) (B x L x d_model_d)
+            torch.tensor: Attention weights of self-attention
+            torch.tensor: Attention weights between the decoder and the encoder
+        """
         x = self.embed(trg)
         if self.rel_pos:
             x, trg_pe = self.pe(x)
@@ -53,17 +74,36 @@ class LSTMDecoder(nn.Module):
         self.num_decoder_hidden_nodes = hp.d_model_d #hp.num_hidden_nodes_decoder
         self.num_encoder_hidden_nodes = hp.d_model_e
         self.num_classes = hp.vocab_size
-        self.att = LocationAttention(hp)
+        if self.hp.multihead:
+            self.att = MultiHeadAttention(4, self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes, 0.1)
+        else:
+            self.att = LocationAttention(hp)
         # decoder
         self.L_sy = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes, bias=False)
         self.L_gy = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes)
         self.L_yy = nn.Linear(self.num_decoder_hidden_nodes, self.num_classes)
 
-        self.L_ys = nn.Embedding(self.num_classes, self.num_decoder_hidden_nodes * 4)
+        #self.L_ys = nn.Embedding(self.num_classes, self.num_decoder_hidden_nodes * 4)
         #self.L_ys = nn.Linear(self.num_classes, self.num_decoder_hidden_nodes * 4 , bias=False)
-        self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes * 4, bias=False)
-        self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes * 4)
+        #self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes * 4, bias=False)
+        #self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes * 4)
 
+        #self.L_ys = nn.Embedding(self.num_classes, self.num_decoder_hidden_nodes)
+        #self.L_ys = nn.Linear(self.num_classes, self.num_decoder_hidden_nodes * 4 , bias=False)
+        #self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes, bias=False)
+        #self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes, bias=False)
+        #self.lstm_cell = nn.LSTMCell(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes)
+        # previous version
+        self.L_ys = nn.Embedding(self.num_classes, self.num_decoder_hidden_nodes*4)
+        #self.L_ys = nn.Linear(self.num_classes, self.num_decoder_hidden_nodes * 4)
+        self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes*4, bias=False)
+        self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes*4)
+
+        #self.norm_y = nn.LayerNorm(self.num_decoder_hidden_nodes)
+        #self.norm0 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
+        #self.norm1 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
+        #self.norm2 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
+        #self.norm3 = nn.LayerNorm(self.num_decoder_hidden_nodes)
 
     def forward(self, targets, hbatch, src_mask, trg_mask):
         device = hbatch.device
@@ -80,11 +120,21 @@ class LSTMDecoder(nn.Module):
         e_mask[src_mask.transpose(1,2) is False] = 0.0
 
         for step in range(num_labels):
-            g, alpha = self.att(s, hbatch, alpha, e_mask)
+            if self.hp.multihead:
+                g, alpha = self.att(s.unsqueeze(1), hbatch, hbatch, src_mask)
+                g = g.squeeze(1)
+                #g = self.norm_g(torch.nn.Dropout(0.1)(g)).squeeze(1) + s
+            else:
+                g, alpha = self.att(s, hbatch, alpha, e_mask)
             # generate
             y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
+            #y = self.L_yy(self.norm_y(self.L_gy(g) + self.L_sy(s)))
             # recurrency calcuate
+            #rec_input = self.norm0(self.L_ys(targets[:, step])) + self.norm1(self.L_ss(s)) + self.norm2(self.L_gs(g))
             rec_input = self.L_ys(targets[:, step]) + self.L_ss(s) + self.L_gs(g)
+
+            #c = (torch.sigmoid(forgetgate) * c) + (torch.sigmoid(ingate) * torch.tanh(cellgate))
+            #s = torch.sigmoid(outgate) * torch.tanh(s)
             s, c = self._func_lstm(rec_input, c)
 
             youtput[:, step] = y
@@ -103,11 +153,10 @@ class LSTMDecoder(nn.Module):
         num_frames = hbatch.shape[1]
         e_mask = torch.ones((batch_size, num_frames, 1), device=device, requires_grad=False)
 
-        beam_width = 4 #self.hp.beam_width
+        beam_width = 10 #self.hp.beam_width
         max_decoder_seq_len = 200 #self.hp.max_decoder_seq_len
         score_func = 'log_softmax'
         eos_id = 1
-
 
         beam_search = {'result': torch.zeros((beam_width, max_decoder_seq_len), device=device, dtype=torch.long),
                        'length': torch.zeros(beam_width).long(),
@@ -123,6 +172,7 @@ class LSTMDecoder(nn.Module):
 
         beam_step = 0
 
+        #import pdb; pdb.set_trace()
         e_mask[src_mask.transpose(1,2) is False] = 0.0
         for seq_step in range(max_decoder_seq_len):
             # length_penalty = ((5 + seq_step + 1)**0.9 / (5 + 1)**0.9)
@@ -131,12 +181,20 @@ class LSTMDecoder(nn.Module):
             c = copy.deepcopy(beam_search['c'])
             s = copy.deepcopy(beam_search['s'])
             cand_alpha = copy.deepcopy(beam_search['alpha'])
+            #TODO: multhead version
             if seq_step == 0:
                 g, alpha = self.att(s, hbatch, cand_alpha[:, seq_step, :].unsqueeze(1), e_mask)
             else:
                 g, alpha = self.att(s, hbatch, cand_alpha[:, seq_step - 1, :].unsqueeze(1), e_mask)
+            # generate previous
+            #y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
+
+            # new
+            #g, alpha = self.att(s, hbatch, alpha, e_mask)
             # generate
             y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
+            #y = self.L_yy(self.norm_gy(self.L_gy(g)) + self.norm_sy(self.L_sy(s)))
+
 
             if score_func == 'log_softmax':
                 y = F.log_softmax(y, dim=1)
@@ -169,6 +227,8 @@ class LSTMDecoder(nn.Module):
                 tmp_c = c
                 rec_input = self.L_ys(best_indices[0]) + self.L_ss(tmp_s) + self.L_gs(g)
                 tmps, tmpc = self._func_lstm(rec_input, tmp_c)
+                #rec_input = self.norm0(self.L_ys(best_indices[0])) + self.norm1(self.L_ss(s)) + self.norm2(self.L_gs(g))
+                #tmps, tmpc = self.lstm_cell(rec_input, (s, c))
                 beam_search['s'] = tmps
                 beam_search['c'] = tmpc
             else:
@@ -179,7 +239,7 @@ class LSTMDecoder(nn.Module):
                 num_cand = 0
                 i_cand = 0
                 tmp_bestidx = torch.zeros((beam_width), dtype=torch.long, device=device)
-                tmp_g = torch.zeros((beam_width, self.num_decoder_hidden_nodes), dtype=torch.float, device=device)
+                tmp_g = torch.zeros((beam_width, self.num_encoder_hidden_nodes), dtype=torch.float, device=device)
 
                 while num_cand < beam_width:
                     if best_indices[cand_idx[i_cand], cand_ids[i_cand]] == eos_id:
@@ -211,6 +271,7 @@ class LSTMDecoder(nn.Module):
 
                 rec_input = self.L_ys(tmp_bestidx) + self.L_ss(tmp_s) + self.L_gs(tmp_g)
                 tmps, tmpc = self._func_lstm(rec_input, tmp_c)
+                # recurrency calcuate
                 beam_search['s'] = tmps
                 beam_search['c'] = tmpc
 
@@ -233,13 +294,12 @@ class LSTMDecoder(nn.Module):
     @staticmethod
     def _func_lstm(x, c):
         ingate, forgetgate, cellgate, outgate = x.chunk(4, 1)
-        half = 0.5
-        ingate = torch.tanh(ingate * half) * half + half
-        forgetgate = torch.tanh(forgetgate * half) * half + half
-        cellgate = torch.tanh(cellgate)
-        outgate = torch.tanh(outgate * half) * half + half
-        c_next = (forgetgate * c) + (ingate * cellgate)
-        h = outgate * torch.tanh(c_next)
+        #ingate = torch.tanh(ingate * half) * half + half
+        #forgetgate = torch.tanh(forgetgate * half) * half + half
+        #cellgate = torch.tanh(cellgate)
+        #outgate = torch.tanh(outgate * half) * half + half
+        c_next = (torch.sigmoid(forgetgate) * c) + (torch.sigmoid(ingate) * torch.tanh(cellgate))
+        h = torch.sigmoid(outgate) * torch.tanh(c_next)
         return h, c_next
 
     def _plot_attention(self, attention, label=None):
