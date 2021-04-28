@@ -16,8 +16,8 @@ class DecoderLayer(nn.Module):
         self.dropout_2 = nn.Dropout(dropout)
         self.dropout_3 = nn.Dropout(dropout)
 
-        self.attn_1 = MultiHeadAttention(heads, d_model, dropout=dropout)
-        self.attn_2 = MultiHeadAttention(heads, d_model, dropout=dropout)
+        self.attn_1 = MultiHeadAttention(heads, d_model, d_model_q=d_model, dropout=dropout)
+        self.attn_2 = MultiHeadAttention(heads, d_model, d_model_q=d_model, dropout=dropout)
         self.ff = FeedForward(d_model, dropout=dropout)
 
     def forward(self, x, e_outputs, src_mask, trg_mask):
@@ -36,7 +36,7 @@ class EncoderLayer(nn.Module):
         super().__init__()
         self.norm_1 = nn.LayerNorm(d_model)
         self.norm_2 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(heads, d_model, dropout=dropout)
+        self.attn = MultiHeadAttention(heads, d_model, d_model_q=d_model, dropout=dropout)
         self.ff = FeedForward(d_model, dropout=dropout)
         self.dropout_1 = nn.Dropout(dropout)
         self.dropout_2 = nn.Dropout(dropout)
@@ -59,7 +59,6 @@ class ConformerEncoderLayer(nn.Module):
         self.ff_2 = FeedForwardConformer(d_model, d_ff=d_model*4, dropout=dropout)
 
         self.dropout_1 = nn.Dropout(dropout)
-        self.dropout_2 = nn.Dropout(dropout)
 
     def forward(self, x, pe, mask):
         x = x + 0.5 * self.ff_1(x)
@@ -68,5 +67,5 @@ class ConformerEncoderLayer(nn.Module):
         x, attn_enc_enc = self.attn(x,x,x,pe,mask)
         x = res + self.dropout_1(x)
         x = x + self.conv_module(x)
-        x = x + self.dropout_2(self.ff_2(x))
+        x = x + 0.5 * self.ff_2(x)
         return x, attn_enc_enc
