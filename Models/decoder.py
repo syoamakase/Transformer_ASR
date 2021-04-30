@@ -182,10 +182,15 @@ class LSTMDecoder(nn.Module):
             s = copy.deepcopy(beam_search['s'])
             cand_alpha = copy.deepcopy(beam_search['alpha'])
             #TODO: multhead version
-            if seq_step == 0:
-                g, alpha = self.att(s, hbatch, cand_alpha[:, seq_step, :].unsqueeze(1), e_mask)
+            if self.hp.multihead:
+                k_v_input = hbatch.expand(beam_width, hbatch.shape[-2], hbatch.shape[-1])
+                g, _ = self.att(s, k_v_input, k_v_input, src_mask)
+                g = g.squeeze(1)
             else:
-                g, alpha = self.att(s, hbatch, cand_alpha[:, seq_step - 1, :].unsqueeze(1), e_mask)
+                if seq_step == 0:
+                    g, alpha = self.att(s, hbatch, cand_alpha[:, seq_step, :].unsqueeze(1), e_mask)
+                else:
+                    g, alpha = self.att(s, hbatch, cand_alpha[:, seq_step - 1, :].unsqueeze(1), e_mask)
             # generate previous
             #y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
 
@@ -222,7 +227,8 @@ class LSTMDecoder(nn.Module):
                 beam_search['score'] = scores[0]
                 beam_search['result'][:, 0] = best_indices[0]
                 beam_search['length'] += 1
-                beam_search['alpha'][:, 0, :] = alpha.squeeze(1)
+                if not self.hp.multihead:
+                    beam_search['alpha'][:, 0, :] = alpha.squeeze(1)
                 tmp_s = s
                 tmp_c = c
                 rec_input = self.L_ys(best_indices[0]) + self.L_ss(tmp_s) + self.L_gs(g)
@@ -247,8 +253,9 @@ class LSTMDecoder(nn.Module):
                         beam_results['result'][beam_step] = cand_seq[cand_idx[i_cand]]
                         beam_results['result'][beam_step][seq_step] = best_indices[cand_idx[i_cand], cand_ids[i_cand]]
                         beam_results['length'][beam_step] = seq_step + 1
-                        beam_results['alpha'][beam_step] = cand_alpha[cand_idx[i_cand], :, :]
-                        beam_results['alpha'][beam_step][seq_step] = alpha[cand_idx[i_cand]].squeeze(0)
+                        if not self.hp.multihead:
+                            beam_results['alpha'][beam_step] = cand_alpha[cand_idx[i_cand], :, :]
+                            beam_results['alpha'][beam_step][seq_step] = alpha[cand_idx[i_cand]].squeeze(0)
                         beam_step += 1
                         i_cand += 1
                     else:
@@ -257,8 +264,9 @@ class LSTMDecoder(nn.Module):
                         beam_search['result'][num_cand][seq_step] = best_indices[cand_idx[i_cand], cand_ids[i_cand]]
                         beam_search['length'][num_cand] += 1
                         tmp_bestidx[num_cand] = best_indices[cand_idx[i_cand], cand_ids[i_cand]]
-                        beam_search['alpha'][num_cand] = cand_alpha[cand_idx[i_cand], :, :]
-                        beam_search['alpha'][num_cand][seq_step] = alpha[cand_idx[i_cand]].squeeze(0)
+                        if not self.hp.multihead:
+                            beam_search['alpha'][num_cand] = cand_alpha[cand_idx[i_cand], :, :]
+                            beam_search['alpha'][num_cand][seq_step] = alpha[cand_idx[i_cand]].squeeze(0)
                         tmp_s[num_cand] = s[cand_idx[i_cand]]
                         tmp_c[num_cand] = c[cand_idx[i_cand]]
                         tmp_g[num_cand] = g[cand_idx[i_cand]]

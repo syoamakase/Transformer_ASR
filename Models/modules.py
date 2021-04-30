@@ -38,21 +38,20 @@ class CNN_embedding_avepool(nn.Module):
         cnn_dim = hp.cnn_dim
         self.subsampling_rate = hp.subsampling_rate
 
-        self.l1_flag = False
-        if idim != 80:
+        self.l1_flag = hp.l1_flag
+        if self.l1_flag:
             self.l1 = nn.Linear(idim, 80) #cnn_dim)
-            self.l1_flag = True
             
         self.conv1 = nn.Conv2d(1, cnn_dim, 3, 1)
         self.conv2 = nn.Conv2d(cnn_dim, cnn_dim, 3, 1)
-        hidden_dim = (cnn_dim-2) // 2 #(idim-2) // 2
-        hidden_dim = (hidden_dim-2) // 2
         if self.l1_flag:
-            hidden_dim *= 80
+            hidden_dim = (80-2)//2
             print(f'l1 is used for shape {hidden_dim}')
         else:
-            hidden_dim *= idim
-            print('l1 is NOT used')
+            hidden_dim = (idim-2)//2
+            print(f'l1 is NOT used for shape {hidden_dim}')
+        hidden_dim = (hidden_dim-2) // 2 #(idim-2) // 2
+        hidden_dim *= cnn_dim
         self.out = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, x, x_mask):

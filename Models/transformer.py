@@ -38,7 +38,6 @@ class Transformer(nn.Module):
                 self.cnn_encoder = CNN_embedding_avepool(hp)
             else:
                 self.cnn_encoder = CNN_embedding(hp)
-            self.cnn_encoder = CNN_embedding(hp)
         else:
             self.embedder = nn.Linear(hp.mel_dim*hp.frame_stacking, self.d_model_e)
 
