@@ -104,7 +104,7 @@ def init_weight(m):
 
     if classname.find('LSTM') != -1:
         for name, param in m.named_parameters():
-            if 'weight' in name:
+            if 'weight' in name and not 'norm' in name:
                 nn.init.kaiming_normal_(param.data)
             if 'bias' in name:
                 param.data.fill_(0)
@@ -136,17 +136,20 @@ def create_masks(src_pos, trg_pos, src_pad=0, trg_pad=0):
     
         size = trg_pos.size(1) # get seq_len for matrix
         np_mask = npeak_mask(size)
-        if trg_pos.is_cuda:
-            np_mask.cuda()
+        #if trg_pos.is_cuda:
+        np_mask.to(trg_pos.device)
         trg_mask = trg_mask & np_mask
     else:
         trg_mask = None
     return src_mask, trg_mask
 
-def adjust_learning_rate(optimizer, epoch):
-    if epoch > 20:
+def adjust_learning_rate(optimizer, epoch, threshold_epoch=20):
+    lr = 0
+    if epoch >= threshold_epoch:
         for param_group in optimizer.param_groups:
-            param_group['lr'] *= 0.8 
+            param_group['lr'] *= 0.8
+            lr = param_group['lr']
+    return lr
 
 def save_hparams(base_file, save_file):
     if os.path.exists(save_file):
@@ -161,7 +164,8 @@ def overwrite_hparams(args):
 
 def fill_variables(hp, verbose=True):
     default_var = {'pe_alpha': False, 'stop_lr_change': 100000000, 'feed_forward': 'linear', 'optimizer': 'adam', 'mel_dim':80, 'is_flat_start':False,'dataset_shuffle_all':False, 'optimizer_type': 'Noam', 'init_lr':1e-3, 'save_per_epoch': 50, 'save_attention_per_step': 2000, 'num_F':2,
-                    'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':'', 'granularity':1, 'subsampling_rate': 4, 'frame_stacking':1, 'decoder_rel_pos':False, 'random_mask':False, 'decoder': 'Transformer'}
+                    'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':'', 'granularity':1, 'subsampling_rate': 4, 'frame_stacking':None, 'decoder_rel_pos':False, 'random_mask':False, 'decoder': 'Transformer', 'cnn_avepool':False,
+                    'decay_epoch': 100000, 'mean_utt':False, 'multihead':False, 'l1_flag':False, 'load_name_lm': None, 'use_ctc':False, 'lm_weight': None, 'cnn_swish':False, 'cnn_ln': False}
     for key, value in default_var.items():
         if not hasattr(hp, key):
             if verbose:

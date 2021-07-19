@@ -5,8 +5,8 @@ import os
 import sys
 import time
 
-import copy
 import random
+import math
 import numpy as np
 
 import torch
@@ -14,17 +14,16 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 from tqdm import tqdm
-import datasets
+import datasets_wav2vec2
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
 from utils import hparams as hp
-from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight, frame_stacking
-from Models.transformer import Transformer
+from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight
+from Models.transformer_wav2vec2 import TransformerWav2vec2
 
 random.seed(77)
 torch.random.manual_seed(777)
@@ -38,13 +37,42 @@ def get_learning_rate(step, hp):
     d_model = 256
     return warmup_factor * min(step ** -0.5, step * warmup_step ** -1.5) * (d_model ** -0.5)
 
+def get_learning_rate_tristage(step):
+    max_update = 80000
+    phase_ratio = [0.1, 0.4, 0.5]
+    final_lr_scale = 0.05
+    init_lr_scale = 0.01
 
-def average_gradients(model):
-    """ Gradient averaging. """
-    size = float(dist.get_world_size())
-    for param in model.parameters():
-        dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
-        param.grad.data /= size
+    peak_lr = 0.00003
+    init_lr = init_lr_scale * peak_lr
+    final_lr = final_lr_scale * peak_lr
+    
+    warmup_steps = int(max_update * phase_ratio[0])
+    hold_steps = int(max_update * phase_ratio[1])
+    decay_steps = int(max_update * phase_ratio[2])
+
+    warmup_rate = (peak_lr - init_lr) / warmup_steps
+    decay_factor = -math.log(final_lr_scale) / decay_steps
+
+    # stage 0
+    if step < warmup_steps:
+        lr = init_lr + warmup_rate * step
+        return lr
+    
+    offset = warmup_steps
+    # stage 1
+    if step < offset + hold_steps:
+        lr = peak_lr
+        return lr
+
+    offset += hold_steps
+    # stage 2
+    if step <= offset + decay_steps:
+        lr = peak_lr *  math.exp(-decay_factor * step)
+        return lr
+
+    # stage 3
+    return final_lr
 
 def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
     scaler = torch.cuda.amp.GradScaler()
@@ -59,43 +87,41 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
         if epoch >= hp.decay_epoch:
             lr = adjust_learning_rate(optimizer, epoch, hp.decay_epoch)
         else:
-            lr = get_learning_rate(step//hp.accum_grad+1, hp)
+            if hp.lr_tristage:
+                lr = get_learning_rate_tristage(step // hp.accum_grad + 1)
+            else:
+                lr = get_learning_rate(step//hp.accum_grad+1, hp)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
     optimizer.zero_grad()
     for d in dataloader:
-        text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
+        text, wav_input, pos_text, pos_wav2vec2, text_lengths, wav2vec2_lengths = d
 
         text = text.to(device, non_blocking=True)
-        mel_input = mel_input.to(device, non_blocking=True)
+        wav_input = wav_input.to(device, non_blocking=True)
         pos_text = pos_text.to(device, non_blocking=True)
-        pos_mel = pos_mel.to(device, non_blocking=True)
+        pos_wav2vec2 = pos_wav2vec2.to(device, non_blocking=True)
         text_lengths = text_lengths.to(device, non_blocking=True)
     
-        #if hp.frame_stacking > 1:
-        #    mel_input, pos_mel = frame_stacking(mel_input, pos_mel, hp.frame_stacking)
-
-        batch_size = mel_input.shape[0]
+        batch_size = wav_input.shape[0]
     
         if hp.decoder == 'LSTM':
             text_input = text
-            src_mask, trg_mask = create_masks(pos_mel, pos_text)
+            src_mask, trg_mask = create_masks(pos_wav2vec2, pos_text)
         else:
             text_input = text[:, :-1]
-            src_mask, trg_mask = create_masks(pos_mel, pos_text[:, :-1])
+            src_mask, trg_mask = create_masks(pos_wav2vec2, pos_text[:, :-1])
 
-        #print(f'load {time.time() - local_time}')
-        #local_time = time.time()
-    
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             if args.n_gpus > 1:
                 dist.barrier()
-            youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask)
-    
-            #print(f'forward {time.time() - local_time}')
-            #local_time = time.time()
+            youtputs, ctc_outputs, attn_dec_dec, attn_dec_enc = model(wav_input, text_input, src_mask, trg_mask, step//hp.accum_grad+1)
 
+            print('step {} {}'.format(step, train_len))
+            print('batch size = {}'.format(batch_size))
+            print('lr = {}'.format(lr))
+            step += 1
             if hp.decoder != 'ctc':
                 loss_att = 0.0
                 # cross entropy
@@ -123,51 +149,28 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 else:
                     ys = text[:, 1:].contiguous().view(-1)
                     loss_att = F.cross_entropy(youtputs.view(-1, youtputs.size(-1)), ys, ignore_index=trg_pad)
-                print('loss_att =', loss_att.item())
+                print(f'loss_att = {loss_att.item()}')
 
-            print('step {} {}'.format(step, train_len))
-            print('batch size = {}'.format(batch_size))
-            print('lr = {}'.format(lr))
-            step += 1
- 
+
             if hp.decoder == 'ctc':
                 predict_ts_ctc = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
-                mel_lengths_downsample = mel_lengths 
-                for i in range(int(np.log2(hp.subsampling_rate))):
-                    mel_lengths_downsample = (mel_lengths_downsample - 2) // 2
-                loss_ctc = F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0, zero_infinity=False)
+                loss_ctc = F.ctc_loss(predict_ts_ctc, text, wav2vec2_lengths, text_lengths, blank=0)
                 print('loss_ctc = {}'.format(loss_ctc.item()))
-                print('zero')
                 loss = loss_ctc
-
-            elif hp.mode == 'ctc-transformer':
+            elif hp.use_ctc:
+                ## NOTE: ctc loss does not support fp16?
                 predict_ts_ctc = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
-                #mel_lengths_downsample = ((mel_lengths - 2) // 2 - 2) // 2
-                mel_lengths_downsample = mel_lengths 
-                for i in range(int(np.log2(hp.subsampling_rate))):
-                    mel_lengths_downsample = (mel_lengths_downsample - 2) // 2
-                loss_ctc = F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0)
+                loss_ctc = F.ctc_loss(predict_ts_ctc, text, wav2vec2_lengths, text_lengths, blank=0)
                 print('loss_ctc = {}'.format(loss_ctc.item()))
                 loss = (hp.mlt_weight * loss_att + (1 - hp.mlt_weight) * loss_ctc)
-            else:
+            else:            
                 loss = loss_att
             print('loss =', loss.item())
         if not torch.isnan(loss):
             if hp.amp:
                 loss /= hp.accum_grad
                 scaler.scale(loss).backward()
-                if args.debug:
-                    print('debug???')
-                    average_gradients(model)
-                #scaler.unscale_(optimizer)
-                #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
-                #scaler.step(optimizer)
-                #scaler.update()
-                #print(f'backward {time.time() - local_time}')
-                #local_time = time.time()
                 if step % hp.accum_grad == 0:
-                    #scaler.unscale_(optimizer)
-                    #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
                     if hp.clip is not None:
                         scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
@@ -177,21 +180,19 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss /= hp.accum_grad
                 loss.backward()
                 if step % hp.accum_grad == 0:
-                    #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
                     optimizer.step()
 
             if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
                 if epoch < hp.decay_epoch:
-                    lr = get_learning_rate(step // hp.accum_grad + 1, hp)
+                    if hp.lr_tristage:
+                        lr = get_learning_rate_tristage(step // hp.accum_grad + 1)
+                    else:
+                        lr = get_learning_rate(step // hp.accum_grad + 1, hp)
                     for param_group in optimizer.param_groups:
                         param_group['lr'] = lr
         else:
             print('loss is nan')
             del loss
-            #load_dir = hp.save_dir
-            #map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
-            #loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(epoch))), map_location=map_location)
-            #model.load_state_dict(loaded_dict)
             sys.exit(1)
         if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
             optimizer.zero_grad()
@@ -206,34 +207,32 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
     #acc = 1.0 * n_correct / float(sum(text_lengths))
     #print('acc = {}'.format(acc))
     if rank == 0 and ((epoch+1) % hp.save_per_epoch >= (hp.save_per_epoch - 10) or (epoch+1) % hp.save_per_epoch == 0):
-        #torch.save(model.to('cpu').state_dict(), hp.save_dir+"/network.epoch{}".format(epoch+1))
         torch.save(model.state_dict(), hp.save_dir+"/network.epoch{}".format(epoch+1))
         print('save model')
-        #model = model.to(rank)
-        #torch.save(model.state_dict(), hp.save_dir+"/network.epoch{}".format(epoch+1))
     
     if rank == 0 and (epoch + 1) % hp.save_per_epoch == 0:
         torch.save(optimizer.state_dict(), hp.save_dir+"/network.optimizer.epoch{}".format(epoch+1))
         print('save optimizer')
 
-    if args.n_gpus > 1:
-        dist.barrier()
+    #if args.n_gpus > 1:
+    #    dist.barrier()
     return step
 
 
 def get_dataloader(step, args, hp):
+    ## TODO: Mask setting
     if step // hp.accum_grad > hp.warmup_step:
-        train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=hp.use_spec_aug, feat_norm=[hp.mean_file, hp.var_file])
+        train_dataset = datasets_wav2vec2.TrainDatasets(hp.train_script, hp)
     else:
-        train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
+        train_dataset = datasets_wav2vec2.TrainDatasets(hp.train_script, hp)
 
-    collate_fn_transformer = datasets.collate_fn
+    collate_fn_transformer = datasets_wav2vec2.collate_fn
     if hp.batch_size is not None:
-        sampler = datasets.NumBatchSampler(train_dataset, hp.batch_size)
+        sampler = datasets_wav2vec2.NumBatchSampler(train_dataset, hp.batch_size)
     elif hp.max_seqlen is not None:
-        sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
+        sampler = datasets_wav2vec2.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
 
-    train_sampler = datasets.DistributedSamplerWrapper(sampler) if args.n_gpus > 1 else sampler
+    train_sampler = datasets_wav2vec2.DistributedSamplerWrapper(sampler) if args.n_gpus > 1 else sampler
     dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=8, collate_fn=collate_fn_transformer)
 
     return dataloader
@@ -272,7 +271,6 @@ def cleanup():
 
 def run_distributed(fn, args, hp):
     port = '60' + str(int(time.time()))[-4:]
-    #port = str(np.random.randint(600000, 610000)) 
     print(f'port = {port}')
     try:
         mp.spawn(fn, args=(args, hp, port), nprocs=args.n_gpus, join=True)
@@ -284,8 +282,10 @@ def run_training(rank, args, hp, port=None):
         init_distributed(rank, args.n_gpus, port)
         torch.cuda.set_device(f'cuda:{rank}')
 
-    model = Transformer(hp)
-    model.apply(init_weight)
+    ## NOTE: variable
+    model = TransformerWav2vec2(hp, pretrain_model='facebook/wav2vec2-large-lv60', freeze_feature_extractor=hp.freeze_feature_extractor)
+    ## TODO: change init_weight (maybe initialize all networks)
+    #model.apply(init_weight)
     model.train()
 
     if rank == 0:
@@ -293,12 +293,13 @@ def run_training(rank, args, hp, port=None):
 
     model = model.to(rank)
 
-    #print(model)
     if args.n_gpus > 1:
         model = DDP(torch.nn.SyncBatchNorm.convert_sync_batchnorm(model), device_ids=[rank])
     
     max_lr = hp.init_lr
     if hp.optimizer_type == 'Noam':
+        ## NOTE: scheduling?
+        ## NOTE: learning rate?
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.98), eps=1e-9)
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr)
@@ -321,18 +322,11 @@ def run_training(rank, args, hp, port=None):
             start_epoch = 0
             print('flat_start')
         else:
-            #train_dataset = datasets.get_dataset(hp.train_script, hp, spec_aug=False, feat_norm=[hp.mean_file, hp.var_file])
-            #collate_fn_transformer = datasets.collate_fn
-            #if hp.batch_size is not None:
-            #    sampler = datasets.NumBatchSampler(train_dataset, hp.batch_size)
-            #elif hp.max_seqlen is not None:
-            #    sampler = datasets.LengthsBatchSampler(train_dataset, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False, shuffle_all=hp.dataset_shuffle_all)
-            #train_sampler = DistributedSampler(sampler) if args.n_gpus > 1 else sampler
-            #dataloader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4, collate_fn=collate_fn_transformer)
             loaded_dict = torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
             optimizer.load_state_dict(loaded_dict)
-            step = loaded_dict['state'][0]['step'] * hp.accum_grad
-            lr = get_learning_rate(step//hp.accum_grad+1, hp)
+            step = loaded_dict['state'][0]['step']
+            #lr = get_learning_rate(step//hp.accum_grad+1, hp)
+            lr = get_learning_rate_tristage(step // hp.accum_grad + 1)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
             del loaded_dict
@@ -345,10 +339,9 @@ def run_training(rank, args, hp, port=None):
     print('params = {0:.2f}M'.format(pytorch_total_params / 1000 / 1000))
     train_epoch(model, optimizer, args, hp, step=step, start_epoch=start_epoch, rank=rank)
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hp_file', type=str, default='hparams.py')
-    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
     hp.configure(args.hp_file)
     fill_variables(hp)
@@ -356,16 +349,6 @@ if __name__ == '__main__':
 
     os.makedirs(hp.save_dir, exist_ok=True)
 
-    # # multi-gpu setup
-    # if torch.cuda.device_count() > 1:
-    #     # multi-gpu configuration
-    #     ngpu = torch.cuda.device_count()
-    #     device_ids = list(range(ngpu))
-    #     model = torch.nn.DataParallel(model, device_ids)
-    #     model.cuda()
-    # else:
-    #     model.to(DEVICE)
-    
     n_gpus = torch.cuda.device_count()
     args.__setattr__('n_gpus', n_gpus)
 
@@ -373,3 +356,6 @@ if __name__ == '__main__':
         run_distributed(run_training, args, hp)
     else:
         run_training(0, args, hp, None)
+
+if __name__ == '__main__':
+    main()

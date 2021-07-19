@@ -123,7 +123,6 @@ class LSTMDecoder(nn.Module):
             if self.hp.multihead:
                 g, alpha = self.att(s.unsqueeze(1), hbatch, hbatch, src_mask)
                 g = g.squeeze(1)
-                #g = self.norm_g(torch.nn.Dropout(0.1)(g)).squeeze(1) + s
             else:
                 g, alpha = self.att(s, hbatch, alpha, e_mask)
             # generate
@@ -140,7 +139,7 @@ class LSTMDecoder(nn.Module):
             youtput[:, step] = y
         return youtput, None, None
     
-    def decode_v2(self, hbatch, src_mask, model_lm=None):
+    def decode_v2(self, hbatch, src_mask, model_lm=None, lm_weight=0.2):
         """
         decode function with a few modification.
         1. Add the candidate when the prediction is </s>
@@ -206,7 +205,7 @@ class LSTMDecoder(nn.Module):
                 if model_lm is not None and seq_step > 0:
                     lm_input = cand_seq[:, :seq_step]
                     lm_score = model_lm(lm_input)[:, -1, :]
-                    tmpy = y + self.hp.lm_weight * F.log_softmax(lm_score, dim=1)
+                    tmpy = y + lm_weight * F.log_softmax(lm_score, dim=1) + 1
                 else:
                     tmpy = y.clone()
             elif score_func == 'softmax':
@@ -214,7 +213,7 @@ class LSTMDecoder(nn.Module):
                 if model_lm is not None and seq_step:
                     lm_input = cand_seq[:, :seq_step]
                     lm_score = model_lm(lm_input)[:, -1, :]
-                    y = y + self.hp.lm_weight * F.softmax(lm_score, dim=1)
+                    y = y + lm_weight * F.softmax(lm_score, dim=1)
                 else:
                     tmpy = y.clone()
 
