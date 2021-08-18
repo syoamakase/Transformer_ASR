@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+#-*- coding: utf-8 -*-
 # test comment
 import argparse
 import os
@@ -20,6 +20,11 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+
+#from warprnnt_pytorch import rnnt_loss
+#from warp_rnnt import rnnt_loss
+from train_optuna_v2 import recognize
+
 import torch.distributed as dist
 
 from utils import hparams as hp
@@ -32,10 +37,11 @@ torch.cuda.manual_seed_all(777)
 np.random.seed(777)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+
 def get_learning_rate(step, hp):
     warmup_step = hp.warmup_step #hp.warmup_step # 4000
     warmup_factor = hp.warmup_factor #hp.warmup_factor #10.0 # 1.0
-    d_model = 256
+    d_model = hp.d_model_e
     return warmup_factor * min(step ** -0.5, step * warmup_step ** -1.5) * (d_model ** -0.5)
 
 
@@ -45,6 +51,7 @@ def average_gradients(model):
     for param in model.parameters():
         dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
         param.grad.data /= size
+
 
 def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
     scaler = torch.cuda.amp.GradScaler()
@@ -62,10 +69,16 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             lr = get_learning_rate(step//hp.accum_grad+1, hp)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
+    else:
+        lr = 1e-3
 
     optimizer.zero_grad()
     for d in dataloader:
-        text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
+        if hp.dev_mode:
+            text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths, real_flag = d
+            real_flag = real_flag.to(device, non_blocking=True)
+        else:
+            text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
 
         text = text.to(device, non_blocking=True)
         mel_input = mel_input.to(device, non_blocking=True)
@@ -73,30 +86,31 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
         pos_mel = pos_mel.to(device, non_blocking=True)
         text_lengths = text_lengths.to(device, non_blocking=True)
     
-        #if hp.frame_stacking > 1:
-        #    mel_input, pos_mel = frame_stacking(mel_input, pos_mel, hp.frame_stacking)
+        if hp.frame_stacking > 1:
+            mel_input, pos_mel = frame_stacking(mel_input, pos_mel, hp.frame_stacking)
 
         batch_size = mel_input.shape[0]
     
-        if hp.decoder == 'LSTM':
+        if hp.decoder == 'LSTM' or hp.decoder.lower() == 'transducer':
             text_input = text
             src_mask, trg_mask = create_masks(pos_mel, pos_text)
         else:
             text_input = text[:, :-1]
             src_mask, trg_mask = create_masks(pos_mel, pos_text[:, :-1])
-
-        #print(f'load {time.time() - local_time}')
-        #local_time = time.time()
     
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             if args.n_gpus > 1:
                 dist.barrier()
-            youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask)
+            if hp.dev_mode:
+                youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask, real_flag)
+            else:
+                youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask)
     
-            #print(f'forward {time.time() - local_time}')
-            #local_time = time.time()
+            print('step {} {}'.format(step, train_len))
+            print('batch size = {}'.format(batch_size))
+            print('lr = {}'.format(lr))
 
-            if hp.decoder != 'ctc':
+            if hp.decoder == 'LSTM' or hp.decoder.lower() == 'transformer':
                 loss_att = 0.0
                 # cross entropy
                 if label_smoothing:
@@ -124,15 +138,26 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                     ys = text[:, 1:].contiguous().view(-1)
                     loss_att = F.cross_entropy(youtputs.view(-1, youtputs.size(-1)), ys, ignore_index=trg_pad)
                 print('loss_att =', loss_att.item())
+                loss = loss_att
 
-            print('step {} {}'.format(step, train_len))
-            print('batch size = {}'.format(batch_size))
-            print('lr = {}'.format(lr))
-            step += 1
- 
-            if hp.decoder == 'ctc':
+
+            elif hp.decoder.lower() == 'transducer':
+                mel_lengths_downsample = mel_lengths 
+                for i in range(int(np.log2(hp.subsampling_rate))):
+                    mel_lengths_downsample = (mel_lengths_downsample - 2) // 2
+                transducer_outputs = F.log_softmax(youtputs, dim=-1)
+                #loss_transducer = rnnt_loss(transducer_outputs, text.int(), mel_lengths_downsample.int(), text_lengths.int(), blank=0)
+                #loss_transducer = rnnt_loss(transducer_outputs, text.int(), mel_lengths_downsample.to(device).int(), text_lengths.int(), average_frames=True, blank=0)
+
+                loss_transducer = rnnt_loss(transducer_outputs, text.int(), mel_lengths_downsample.to(device).int(), text_lengths.int(), blank=0, reduction='mean')
+
+                print(f'loss_transducer = {loss_transducer.item()}')
+                loss = loss_transducer
+
+            elif hp.decoder == 'ctc':
                 predict_ts_ctc = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
                 mel_lengths_downsample = mel_lengths 
+                
                 for i in range(int(np.log2(hp.subsampling_rate))):
                     mel_lengths_downsample = (mel_lengths_downsample - 2) // 2
                 loss_ctc = F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0, zero_infinity=False)
@@ -140,17 +165,22 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 print('zero')
                 loss = loss_ctc
 
-            elif hp.mode == 'ctc-transformer':
+            if hp.use_ctc:
                 predict_ts_ctc = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
                 #mel_lengths_downsample = ((mel_lengths - 2) // 2 - 2) // 2
                 mel_lengths_downsample = mel_lengths 
-                for i in range(int(np.log2(hp.subsampling_rate))):
-                    mel_lengths_downsample = (mel_lengths_downsample - 2) // 2
+                if hp.subsampling_rate > 1:
+                    for i in range(int(np.log2(hp.subsampling_rate))):
+                        mel_lengths_downsample = (mel_lengths_downsample - 2) // 2
+                elif hp.frame_stacking > 1:
+                    mel_lengths_downsample = mel_lengths_downsample // hp.frame_stacking
                 loss_ctc = F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0)
                 print('loss_ctc = {}'.format(loss_ctc.item()))
-                loss = (hp.mlt_weight * loss_att + (1 - hp.mlt_weight) * loss_ctc)
-            else:
-                loss = loss_att
+                if not torch.isinf(loss_ctc):
+                    loss = (hp.mlt_weight * loss + (1 - hp.mlt_weight) * loss_ctc)
+
+
+            step += 1
             print('loss =', loss.item())
         if not torch.isnan(loss):
             if hp.amp:
@@ -177,7 +207,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss /= hp.accum_grad
                 loss.backward()
                 if step % hp.accum_grad == 0:
-                    #torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
                     optimizer.step()
 
             if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
@@ -251,6 +281,21 @@ def train_epoch(model, optimizer, args, hp, step, start_epoch=0, rank=0):
  
         print("EPOCH {} end".format(epoch+1))
         print('elapsed time = {}'.format(time.time() - start_time))
+        if hp.dev_script is not None:
+            if (epoch >= 20 and epoch % 5 == 0) or epoch == 1 and rank == 0:
+                print('eval')
+                map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+                loaded_dict = load_model("{}".format(os.path.join(hp.save_dir, 'network.epoch{}'.format(epoch+1))), map_location=map_location)
+                model_dev = Transformer(hp)
+                model_dev.load_state_dict(loaded_dict)
+                model_dev.eval()
+                model_dev.to(rank)
+                wer_all = recognize(hp, model_dev, model_lm=None, lm_weight=0.0, calc_wer=True, rank=rank)
+                print(f'{args.hp_file} epoch {epoch} wer is {wer_all}')
+
+                del model_dev
+        #if args.n_gpus > 1:
+        #    dist.barrier()
 
 
 def init_distributed(rank, n_gpus, port):
@@ -285,7 +330,7 @@ def run_training(rank, args, hp, port=None):
         torch.cuda.set_device(f'cuda:{rank}')
 
     model = Transformer(hp)
-    model.apply(init_weight)
+    #model.apply(init_weight)
     model.train()
 
     if rank == 0:

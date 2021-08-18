@@ -8,11 +8,93 @@ import sentencepiece as spm
 import torch
 import torch.nn as nn
 from shutil import copyfile
+import scipy.io.wavfile
 
 #import hparams as hp
 #from utils import hparams as hp
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def load_lmfb_from_wav(hp, load_file):
+    def init_fbank():
+        ms = mhi - mlo;
+        cf = np.zeros((maxChan + 1))
+        for chan in range(1, maxChan + 1):
+            cf[chan] = (1.0 * chan / maxChan) * ms + mlo
+
+        # create lochan map
+        loChan = np.zeros((Nby2 + 1), dtype=np.int)
+        chan = 1
+        for k in range(1, Nby2 + 1):
+            if k < klo or k > khi:
+                loChan[k] = -1
+            else:
+                melk = Mel(k, fres)
+                while (cf[chan] < melk) and (chan <= maxChan):
+                    chan = chan + 1
+                    if not (cf[chan] < melk and chan <= maxChan):
+                        break
+                loChan[k] = chan - 1
+
+        loWt = np.zeros((Nby2 + 1))
+        for k in range(1, Nby2 + 1):
+            chan = loChan[k]
+            if k < klo or k > khi:
+                loWt[k] = 0.0
+            else:
+                if chan > 0:
+                    loWt[k] = ((cf[chan + 1] - Mel(k, fres)) / (cf[chan + 1] - cf[chan]))
+                else:
+                    loWt[k] = (cf[1] - Mel(k, fres)) / (cf[1] - mlo)
+
+        return cf, loChan, loWt
+
+    def get_lmfb(cf, loChan, loWt, htk_ek):
+        mfb = np.zeros((htk_ek.shape[0], numChans + 1))
+
+        for k in range(klo, khi + 1):
+            ek = htk_ek[:, k]
+            bin = loChan[k]
+            t1 = loWt[k] * ek
+            if bin > 0:
+                mfb[:, bin] += t1
+            if bin < numChans:
+                mfb[:, bin + 1] += ek - t1
+
+        return np.log(np.clip(mfb[:, 1:numChans+1], 1e-8, None))
+    
+    def Mel(k, fresh):
+        return 1127 * np.log(1 + (k - 1) * fres)
+
+    def get_spec(signal):
+        num_frames = int(np.ceil(float(np.abs(len(signal) - frame_length)) / frame_step))
+        indices = np.tile(np.arange(0, frame_length), (num_frames, 1)) + np.tile(np.arange(0, num_frames * frame_step, frame_step), (frame_length, 1)).T
+        original_frames = signal[indices.astype(np.int32, copy=False)]
+        # preemp
+        frames = np.hstack((original_frames[:, 0:1] * (1.0 - pre_emphasis), original_frames[:, 1:] - pre_emphasis * original_frames[:, :-1]))
+        # hamming
+        frames *= np.hamming(frame_length)
+        mag_frames = np.absolute(np.fft.rfft(frames, NFFT))  # Magnitude of the FFT
+        htk_ek = np.hstack((mag_frames[:, 0:1], mag_frames[:, 0:256]))
+        return htk_ek
+
+    pre_emphasis = 0.97
+    frame_length = 400
+    frame_step = 160
+    NFFT = 512
+    Nby2 = int(NFFT / 2)
+    fres = 16000 / (NFFT * 700)
+    klo = 2
+    khi = Nby2
+    mlo = 0.0
+    mhi = Mel(Nby2 + 1, fres)
+    numChans = hp.mel_dim
+    maxChan = numChans + 1
+
+    cf, loChan, loWt = init_fbank()
+    sample_rate, signal = scipy.io.wavfile.read(load_file)
+    lmfb = get_lmfb(cf, loChan, loWt, get_spec(signal))
+    return lmfb
 
 def log_config(hp):
     print('PID = {}'.format(os.getpid()))
@@ -98,9 +180,12 @@ def init_weight(m):
     """
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
-        m.weight.data.uniform_(-0.1, 0.1)
-        if isinstance(m.bias, nn.parameter.Parameter):
-            m.bias.data.fill_(0)
+        if classname.find('DropLinear') != -1:
+            pass
+        else:
+            m.weight.data.uniform_(-0.1, 0.1)
+            if isinstance(m.bias, nn.parameter.Parameter):
+                m.bias.data.fill_(0)
 
     if classname.find('LSTM') != -1:
         for name, param in m.named_parameters():
@@ -120,8 +205,65 @@ def init_weight(m):
             m.bias.data.fill_(0)
 
 
-def frame_stacking(mel_input, pos_mel, frame_stacking):
-    pass
+def average_checkpoints(start, end, hp, multi_gpu=False):
+    last = []
+    dirname = hp.save_dir
+    for epoch in range(start, end+1):
+       last.append(os.path.join(dirname, 'network.epoch{}'.format(epoch)))
+        
+    print("average over", last)
+    avg = None
+
+    # sum
+    for path in last:
+        print(path)
+        #states = torch.load(path, map_location=torch.device("cpu"))["model"]
+        states = torch.load(path, map_location=torch.device("cpu"))
+        if avg is None:
+            avg = {}
+            for k in states.keys():
+                if multi_gpu:
+                    avg[k[7:]] = states[k]
+                else:
+                    avg[k] = states[k]
+        else:
+            for k in states.keys():
+                if multi_gpu:
+                    avg[k[7:]] += states[k]
+                else:
+                    avg[k] = states[k]
+
+    # average
+    for k in avg.keys():
+        if avg[k] is not None:
+            avg[k] = torch.div(avg[k], end-start+1)
+
+    #torch.save(avg, args.out)
+    #print('{} saved.'.format(args.out))
+
+    return avg
+
+
+def frame_stacking(x, pos_x, stack):
+    """ frame stacking.
+
+    Args:
+        x (Tensor): The input data (basically log mel-scale filter bank features).
+        x_lengths (list): The lengths of x.
+        stack (int): The factor of frame stacking.
+    Returns:
+        Tensor: Stacked x. the lengths of x is len(x) // stack
+        list: The lengths of stacked x.
+    """
+    if stack == 1:
+        return x, pos_x
+    else:
+        batch_size = x.shape[0]
+        newlen = x.shape[1] // stack
+        pos_x = pos_x[:, :newlen]
+        stacked_x = x[:, 0:newlen*stack].reshape(batch_size, newlen, -1)
+        return stacked_x, pos_x
+
 
 def npeak_mask(size):
     np_mask = np.triu(np.ones((1, size, size)), k=1).astype('uint8')
@@ -164,12 +306,19 @@ def overwrite_hparams(args):
 
 def fill_variables(hp, verbose=True):
     default_var = {'pe_alpha': False, 'stop_lr_change': 100000000, 'feed_forward': 'linear', 'optimizer': 'adam', 'mel_dim':80, 'is_flat_start':False,'dataset_shuffle_all':False, 'optimizer_type': 'Noam', 'init_lr':1e-3, 'save_per_epoch': 50, 'save_attention_per_step': 2000, 'num_F':2,
-                    'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':'', 'granularity':1, 'subsampling_rate': 4, 'frame_stacking':None, 'decoder_rel_pos':False, 'random_mask':False, 'decoder': 'Transformer', 'cnn_avepool':False,
-                    'decay_epoch': 100000, 'mean_utt':False, 'multihead':False, 'l1_flag':False, 'load_name_lm': None, 'use_ctc':False, 'lm_weight': None, 'cnn_swish':False, 'cnn_ln': False}
+                    'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':'', 'granularity':1, 'subsampling_rate': 4, 'frame_stacking':1, 'decoder_rel_pos':False, 'random_mask':False, 'decoder': 'Transformer', 'cnn_avepool':False,
+                    'decay_epoch': 100000, 'mean_utt':False, 'multihead':False, 'l1_flag':False, 'load_name_lm': None, 'use_ctc':False, 'lm_weight': None, 'cnn_swish':False, 'cnn_ln': False, 'beam_width':10}
     for key, value in default_var.items():
         if not hasattr(hp, key):
             if verbose:
                 print('{} is not found in hparams. defalut {} is used.'.format(key, value))
+            setattr(hp, key, value)
+
+    dev_var = {'swish_lstm':False, 'norm_lstm':False, 'load_name_lm_2':None, 'weight_dropout':None, 'dev_mode': None}
+    for key, value in dev_var.items():
+        if not hasattr(hp, key):
+            if verbose:
+                print('{} is not found in hparams in development. defalut {} is used.'.format(key, value))
             setattr(hp, key, value)
 
 def decode_ids(spm_model, text_seq):

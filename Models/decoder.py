@@ -3,9 +3,10 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import Parameter
 
 from Models.utils import repeat
-from Models.modules import Embedder, PositionalEncoder, RelativePositionalEncoder, LocationAttention, MultiHeadAttention
+from Models.modules import Embedder, PositionalEncoder, RelativePositionalEncoder, LocationAttention, MultiHeadAttention, Swish
 from Models.layers import DecoderLayer
 
 class Decoder(nn.Module):
@@ -96,14 +97,24 @@ class LSTMDecoder(nn.Module):
         # previous version
         self.L_ys = nn.Embedding(self.num_classes, self.num_decoder_hidden_nodes*4)
         #self.L_ys = nn.Linear(self.num_classes, self.num_decoder_hidden_nodes * 4)
-        self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes*4, bias=False)
-        self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes*4)
+        if self.hp.weight_dropout:
+            self.L_ss = WeightDropLinear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes*4, bias=False, weight_dropout=self.hp.weight_dropout)
+            self.L_gs = WeightDropLinear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes*4, weight_dropout=self.hp.weight_dropout)
+        else:
+            self.L_ss = nn.Linear(self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes*4, bias=False)
+            self.L_gs = nn.Linear(self.num_encoder_hidden_nodes, self.num_decoder_hidden_nodes*4)
 
         #self.norm_y = nn.LayerNorm(self.num_decoder_hidden_nodes)
-        #self.norm0 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
-        #self.norm1 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
-        #self.norm2 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
-        #self.norm3 = nn.LayerNorm(self.num_decoder_hidden_nodes)
+
+        if self.hp.norm_lstm:
+            self.norm0 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
+            self.norm1 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
+            self.norm2 = nn.LayerNorm(self.num_decoder_hidden_nodes*4)
+            #self.norm3 = nn.LayerNorm(self.num_decoder_hidden_nodes)
+
+        if self.hp.swish_lstm:
+            self.act = Swish()
+
 
     def forward(self, targets, hbatch, src_mask, trg_mask):
         device = hbatch.device
@@ -126,11 +137,16 @@ class LSTMDecoder(nn.Module):
             else:
                 g, alpha = self.att(s, hbatch, alpha, e_mask)
             # generate
-            y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
+            if self.hp.swish_lstm:
+                y = self.L_yy(self.act(self.L_gy(g) + self.L_sy(s)))
+            else:
+                y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
             #y = self.L_yy(self.norm_y(self.L_gy(g) + self.L_sy(s)))
             # recurrency calcuate
-            #rec_input = self.norm0(self.L_ys(targets[:, step])) + self.norm1(self.L_ss(s)) + self.norm2(self.L_gs(g))
-            rec_input = self.L_ys(targets[:, step]) + self.L_ss(s) + self.L_gs(g)
+            if self.hp.norm_lstm:
+                rec_input = self.norm0(self.L_ys(targets[:, step])) + self.norm1(self.L_ss(s)) + self.norm2(self.L_gs(g))
+            else:
+                rec_input = self.L_ys(targets[:, step]) + self.L_ss(s) + self.L_gs(g)
 
             #c = (torch.sigmoid(forgetgate) * c) + (torch.sigmoid(ingate) * torch.tanh(cellgate))
             #s = torch.sigmoid(outgate) * torch.tanh(s)
@@ -139,7 +155,7 @@ class LSTMDecoder(nn.Module):
             youtput[:, step] = y
         return youtput, None, None
     
-    def decode_v2(self, hbatch, src_mask, model_lm=None, lm_weight=0.2):
+    def decode_v2(self, hbatch, src_mask, model_lm=None, lm_weight=0.2, model_lm_2=None, lm_weight_2=0.2, beam_width=10):
         """
         decode function with a few modification.
         1. Add the candidate when the prediction is </s>
@@ -152,7 +168,7 @@ class LSTMDecoder(nn.Module):
         num_frames = hbatch.shape[1]
         e_mask = torch.ones((batch_size, num_frames, 1), device=device, requires_grad=False)
 
-        beam_width = 10 #self.hp.beam_width
+        #beam_width = 10 #self.hp.beam_width
         max_decoder_seq_len = 200 #self.hp.max_decoder_seq_len
         score_func = 'log_softmax'
         eos_id = 1
@@ -171,7 +187,6 @@ class LSTMDecoder(nn.Module):
 
         beam_step = 0
 
-        #import pdb; pdb.set_trace()
         e_mask[src_mask.transpose(1,2) is False] = 0.0
         for seq_step in range(max_decoder_seq_len):
             # length_penalty = ((5 + seq_step + 1)**0.9 / (5 + 1)**0.9)
@@ -196,16 +211,22 @@ class LSTMDecoder(nn.Module):
             # new
             #g, alpha = self.att(s, hbatch, alpha, e_mask)
             # generate
-            y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
+            #y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
+            if self.hp.swish_lstm:
+                y = self.L_yy(self.act(self.L_gy(g) + self.L_sy(s)))
+            else:
+                y = self.L_yy(torch.tanh(self.L_gy(g) + self.L_sy(s)))
             #y = self.L_yy(self.norm_gy(self.L_gy(g)) + self.norm_sy(self.L_sy(s)))
-
 
             if score_func == 'log_softmax':
                 y = F.log_softmax(y, dim=1)
                 if model_lm is not None and seq_step > 0:
                     lm_input = cand_seq[:, :seq_step]
                     lm_score = model_lm(lm_input)[:, -1, :]
-                    tmpy = y + lm_weight * F.log_softmax(lm_score, dim=1) + 1
+                    tmpy = y + lm_weight * F.log_softmax(lm_score, dim=1) #+ 1
+                    if model_lm_2 is not None and seq_step > 0:
+                        lm_score_2 = model_lm_2(lm_input)[:, -1, :]
+                        tmpy += lm_weight_2 * F.log_softmax(lm_score_2, dim=1)
                 else:
                     tmpy = y.clone()
             elif score_func == 'softmax':
@@ -230,9 +251,11 @@ class LSTMDecoder(nn.Module):
                     beam_search['alpha'][:, 0, :] = alpha.squeeze(1)
                 tmp_s = s
                 tmp_c = c
-                rec_input = self.L_ys(best_indices[0]) + self.L_ss(tmp_s) + self.L_gs(g)
+                if self.hp.norm_lstm:
+                    rec_input = self.norm0(self.L_ys(best_indices[0])) + self.norm1(self.L_ss(s)) + self.norm2(self.L_gs(g))
+                else:
+                    rec_input = self.L_ys(best_indices[0]) + self.L_ss(tmp_s) + self.L_gs(g)
                 tmps, tmpc = self._func_lstm(rec_input, tmp_c)
-                #rec_input = self.norm0(self.L_ys(best_indices[0])) + self.norm1(self.L_ss(s)) + self.norm2(self.L_gs(g))
                 #tmps, tmpc = self.lstm_cell(rec_input, (s, c))
                 beam_search['s'] = tmps
                 beam_search['c'] = tmpc
@@ -276,7 +299,10 @@ class LSTMDecoder(nn.Module):
                     if beam_step >= beam_width:
                         break
 
-                rec_input = self.L_ys(tmp_bestidx) + self.L_ss(tmp_s) + self.L_gs(tmp_g)
+                if self.hp.norm_lstm:
+                    rec_input = self.norm0(self.L_ys(tmp_bestidx)) + self.norm1(self.L_ss(tmp_s)) + self.norm2(self.L_gs(tmp_g))
+                else:
+                    rec_input = self.L_ys(tmp_bestidx) + self.L_ss(tmp_s) + self.L_gs(tmp_g)
                 tmps, tmpc = self._func_lstm(rec_input, tmp_c)
                 # recurrency calcuate
                 beam_search['s'] = tmps
@@ -315,6 +341,126 @@ class LSTMDecoder(nn.Module):
         attention = attention.cpu().numpy()
         sp = spm.SentencePieceProcessor()
         sp.Load(self.hp.spm_model)
-        import pdb; pdb.set_trace()
         return 
         
+
+
+class TransducerDecoder(nn.Module):
+    def __init__(self, hp):
+        super().__init__()
+        self.hp = hp
+        self.num_decoder_hidden_nodes = hp.d_model_d * 2 #hp.num_hidden_nodes_decoder
+        self.num_encoder_hidden_nodes = hp.d_model_e
+        self.num_classes = hp.vocab_size
+        self.blank = 0
+
+        self.embed = nn.Embedding(self.num_classes, self.num_classes-1, padding_idx=self.blank)
+        self.embed.weight.data[1:] = torch.eye(self.num_classes-1)
+        self.embed.weight.requires_grad = False
+
+        self.decoder = nn.LSTM(self.num_classes-1, self.num_decoder_hidden_nodes, 1, batch_first=True, dropout=0.5)
+        self.fc1 = nn.Linear(self.num_encoder_hidden_nodes + self.num_decoder_hidden_nodes, self.num_decoder_hidden_nodes)
+        self.fc2 = nn.Linear(self.num_decoder_hidden_nodes, self.num_classes)
+        
+    def joint(self, f, g):
+        out = torch.cat((f, g), dim=-1)
+        out = torch.relu(self.fc1(out))
+        return self.fc2(out)
+
+    def forward(self, targets, hbatch):
+        device = hbatch.device
+        zero = torch.zeros((targets.shape[0], 1), device=device, requires_grad=True).long()
+        ymat = torch.cat((zero, targets), dim=1)
+
+        ymat = self.embed(ymat)
+        ymat, _ = self.decoder(ymat)
+
+        hbatch = hbatch.unsqueeze(dim=2)
+        ymat = ymat.unsqueeze(dim=1)
+        # expand 
+        sz = [max(i, j) for i, j in zip(hbatch.size()[:-1], ymat.size()[:-1])]
+        hbatch = hbatch.expand(torch.Size(sz+[hbatch.shape[-1]]));
+        ymat = ymat.expand(torch.Size(sz+[ymat.shape[-1]]))
+        out = self.joint(hbatch, ymat)
+        # torch.Size([6, 391, 65, 10000])
+        return out, None, None
+        #if targets.is_cuda:
+        #    xlen = xlen.cuda()
+           # ylen = ylen.cuda()
+
+    def decode(self, hbatch):
+        device = hbatch.device
+        vy = torch.tensor([[0]], dtype=torch.long, device=device).view(1, 1)
+        y, h = self.decoder(self.embed(vy))
+        y_seq = []
+        logp = 0
+        for enc in hbatch[0]:
+            ytu = self.joint(enc, y[0][0])
+            out = F.log_softmax(ytu, dim=0)
+            p, pred = torch.max(out, dim=0)
+            pred = int(pred)
+            logp += float(p)
+            if pred != self.blank:
+                y_seq.append(pred)
+                vy.data[0][0] = pred
+                y, h = self.decoder(self.embed(vy), h)
+
+        return y_seq# , -logp
+
+    def decode_v2(self, hbatch, src_mask, model_lm=None, lm_weight=0.2, model_lm_2=None, lm_weight_2=0.2):
+        B = []
+        vy = torch.tensor([[0]], dtype=torch.long, device=device).view(1, 1)
+        beam_search = {'result': torch.zeros((beam_width, max_decoder_seq_len), device=device, dtype=torch.long),
+                       'length': torch.zeros(beam_width).long(),
+                       'score': torch.zeros((beam_width), device=device, dtype=torch.float).fill_(0),
+                       'c': torch.zeros((beam_width, self.num_decoder_hidden_nodes), device=device),
+                       's': torch.zeros((beam_width, self.num_decoder_hidden_nodes), device=device),
+                       'alpha': torch.zeros((beam_width, max_decoder_seq_len, num_frames), device=device)}
+
+        beam_results = {'score': torch.zeros((beam_width), device=device, dtype=torch.float).fill_(0),
+                        'result': torch.zeros((beam_width, max_decoder_seq_len), device=device, dtype=torch.long),
+                        'length': torch.zeros(beam_width).long(),
+                        'alpha': torch.zeros((beam_width, max_decoder_seq_len, num_frames), device=device, requires_grad=False)}
+
+        for enc in hbatch[0]:
+            pass
+            
+
+
+
+
+class WeightDropLinear(torch.nn.Linear):
+    """
+    Wrapper around :class:`torch.nn.Linear` that adds ``weight_dropout`` named argument.
+
+    Args:
+        weight_dropout (float): The probability a weight will be dropped.
+    """
+
+    def __init__(self, *args, weight_dropout=0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        weights = ['weight']
+        _weight_drop(self, weights, weight_dropout)
+
+
+def _weight_drop(module, weights, dropout):
+    """
+    Helper for `WeightDrop`.
+    """
+
+    for name_w in weights:
+        w = getattr(module, name_w)
+        del module._parameters[name_w]
+        module.register_parameter(name_w + '_raw', Parameter(w))
+
+    original_module_forward = module.forward
+
+    def forward(*args, **kwargs):
+        for name_w in weights:
+            raw_w = getattr(module, name_w + '_raw')
+            w = torch.nn.functional.dropout(raw_w, p=dropout, training=module.training)
+            setattr(module, name_w, w)
+
+        return original_module_forward(*args, **kwargs)
+
+    setattr(module, 'forward', forward)

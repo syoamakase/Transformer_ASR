@@ -36,6 +36,7 @@ class TrainDatasets(Dataset):
         self.sp = spm.SentencePieceProcessor()
         self.sp.Load(self.hp.spm_model)
         self.spec_aug = spec_aug
+        self.dev_mode = hp.dev_mode
 
         self.mean_utt = hp.mean_utt
         if feat_norm[0] is not None:
@@ -148,12 +149,55 @@ class TrainDatasets(Dataset):
         pos_text = np.arange(1, text_length + 1)
         pos_mel = np.arange(1, mel_input.shape[0] + 1) 
         #assert (mel_length-2)//4 > text_length, f'mel_length of {mel_name}={(mel_length-2)//4} is shorter than text_length={text_length}'
-        if (mel_length-2)//self.hp.subsampling_rate <= text_length:
+        if (((mel_length-2)//2)-2)//2 <= text_length:
             print(mel_name)
-                                                                                
-        sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text}
+
+        if self.dev_mode:
+            if 'tts_augment':
+                # 0 means tts
+                real_flag = 0
+            else:
+                real_flag = 1
+            sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'real_flag':real_flag, 'dev_mode':self.dev_mode}
+        else:
+            sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'dev_mode':self.dev_mode}
                                                                                 
         return sample
+
+class TrainLMDatasets(Dataset):
+    """
+    Dataset class.
+    """
+    def __init__(self, csv_file, hp, root_dir=None, spec_aug=False, feat_norm=[None, None]):
+        """
+        Args:
+            csv_file (string): Path to the csv file with annotations.
+            root_dir (string): Directory with all the wavs.
+        """
+        # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)
+        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
+        self.hp = hp
+        self.root_dir = root_dir
+        self.sp = spm.SentencePieceProcessor()
+        self.sp.Load(self.hp.spm_model)
+        self.spec_aug = spec_aug
+
+    def __len__(self):                                                          
+        return len(self.landmarks_frame)
+                                        
+    def __getitem__(self, idx):
+        #mel_name = self.landmarks_frame.loc[idx, 0]
+        text_raw = str(self.landmarks_frame.loc[idx, 0]).strip()
+
+        textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text_raw) + [self.sp.eos_id()]
+        text = np.array([int(t) for t in textids], dtype=np.int32)
+        text_length = len(text)
+        pos_text = np.arange(1, text_length + 1)
+
+        sample = {'text': text, 'text_length':text_length, 'pos_text':pos_text}
+                                                                                
+        return sample
+
 
 # class TestDatasets(Dataset):
 #     """
@@ -204,6 +248,22 @@ class TrainDatasets(Dataset):
                                                                                 
 #         return sample
 
+def collate_fn_LM(batch):
+    # Puts each data field into a tensor with outer dimension batch size
+    if isinstance(batch[0], collections.abc.Mapping):
+        text = [d['text'] for d in batch]
+        text_length = [d['text_length'] for d in batch]
+        pos_text = [d['pos_text'] for d in batch]
+        
+        text = _prepare_data(text).astype(np.int32)
+        pos_text = _prepare_data(pos_text).astype(np.int32)
+
+        return torch.LongTensor(text), torch.LongTensor(pos_text), torch.LongTensor(text_length)
+
+    raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}"
+                     .format(type(batch[0]))))
+
+
 def collate_fn(batch):
     # Puts each data field into a tensor with outer dimension batch size
     if isinstance(batch[0], collections.abc.Mapping):
@@ -213,6 +273,10 @@ def collate_fn(batch):
         text_length = [d['text_length'] for d in batch]
         pos_mel = [d['pos_mel'] for d in batch]
         pos_text = [d['pos_text'] for d in batch]
+        dev_mode = batch[0]['dev_mode']
+
+        if dev_mode:
+            real_flag = [d['real_flag'] for d in batch]
         
         #text = [i for i,_ in sorted(zip(text, text_length), key=lambda x: x[1], reverse=True)]
         #mel_input = [i for i, _ in sorted(zip(mel_input, text_length), key=lambda x: x[1], reverse=True)]
@@ -225,7 +289,10 @@ def collate_fn(batch):
         pos_mel = _prepare_data(pos_mel).astype(np.int32)
         pos_text = _prepare_data(pos_text).astype(np.int32)
 
-        return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_lengths)
+        if dev_mode:
+            return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_lengths), torch.LongTensor(real_flag)
+        else:
+            return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_lengths)
 
     raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}"
                      .format(type(batch[0]))))

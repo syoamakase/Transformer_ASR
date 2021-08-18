@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from Models.modules import CNN_embedding, CNN_embedding_avepool
 from Models.encoder import Encoder, ConformerEncoder
-from Models.decoder import Decoder, LSTMDecoder
+from Models.decoder import Decoder, LSTMDecoder, TransducerDecoder
 from utils.utils import npeak_mask, frame_stacking
 
 class Transformer(nn.Module):
@@ -30,10 +30,13 @@ class Transformer(nn.Module):
         self.trg_vocab = hp.vocab_size
         self.encoder_type = hp.encoder
         self.decoder_type = hp.decoder
-        self.mode = hp.mode
+        #self.mode = hp.mode
         self.use_ctc = hp.use_ctc
         self.hp = hp
-        self.frame_stacking = True if hp.frame_stacking is not None else False
+        self.frame_stacking = True if hp.frame_stacking > 1 else False
+
+        if self.hp.dev_mode:
+            self.emb_real_tts = nn.Embedding(2, hp.mel_dim)
 
         if not self.frame_stacking:
             if hp.cnn_avepool:
@@ -52,13 +55,21 @@ class Transformer(nn.Module):
             self.out = nn.Linear(self.d_model_d, self.trg_vocab)
         elif self.decoder_type.lower() == 'ctc':
             self.out = nn.Linear(self.d_model_d, self.trg_vocab) 
+        elif self.decoder_type.lower() == 'transducer':
+            self.decoder = TransducerDecoder(hp)
         else:
             self.decoder = LSTMDecoder(hp)
 
-        if self.mode == 'ctc-transformer':
+        if self.use_ctc:
             self.out_ctc = nn.Linear(self.d_model_e, self.trg_vocab)
 
-    def forward(self, src, trg, src_mask, trg_mask):
+    def forward(self, src, trg, src_mask, trg_mask, real_flag=None):
+        # NOTE: real_flag is dev_mode
+
+        if self.hp.dev_mode:
+            real_tts_emb = F.softsign(self.emb_real_tts(real_flag))
+            src = src + real_tts_emb.unsqueeze(1)
+
         if not self.frame_stacking:
             src, src_mask = self.cnn_encoder(src, src_mask)
         else:
@@ -71,31 +82,33 @@ class Transformer(nn.Module):
         elif self.decoder_type.lower() == 'ctc':
             ctc_outputs = self.out(e_outputs)
             outputs, attn_dec_dec, attn_dec_enc = None, None, None
+        elif self.decoder_type.lower() == 'transducer':
+            outputs, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs)
         else:
             d_output, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs, src_mask, trg_mask)
             outputs = d_output
 
         if self.use_ctc:
             ctc_outputs = self.out_ctc(e_outputs)
-        #else:
-        #    ctc_outputs = None
+        else:
+            ctc_outputs = None
         return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc
 
     @torch.no_grad()
-    def decode(self, src, src_dummy, beam_size=10, model_lm=None, init_tok=2, eos_tok=1, lm_weight=0.2):
+    def decode(self, src, src_dummy, beam_width=10, model_lm=None, init_tok=2, eos_tok=1, lm_weight=0.2, model_lm_2=None, lm_weight_2=0.2):
         with torch.no_grad():
             if not self.frame_stacking:
                 src_mask = (src_dummy != 0).unsqueeze(-2)
                 src, src_mask = self.cnn_encoder(src, src_mask)
             else:
                 src_mask = (src_dummy != 0)
-                #src, src_mask = frame_stacking(src, src_mask, 3)
+                src, src_mask = frame_stacking(src, src_mask, self.hp.frame_stacking)
                 src = self.embedder(src)
 
             e_output, _ = self.encoder(src, src_mask)
 
             if self.decoder_type.lower() == 'transformer':
-                results = self._decode_tranformer_decoder(e_output, src_mask, beam_size, model_lm, init_tok, eos_tok, lm_weight)
+                results = self._decode_tranformer_decoder(e_output, src_mask, beam_width, model_lm, init_tok, eos_tok, lm_weight)
             elif self.decoder_type.lower() == 'ctc':
                 decoder_output = self.out(e_output)
                 batch_size = decoder_output.shape[0]
@@ -108,8 +121,10 @@ class Transformer(nn.Module):
                             results_batch.append(int(x))
                         prev_id = int(x)
                 results = results_batch
+            elif self.decoder_type.lower() == 'transducer':
+                results = self.decoder.decode(e_output)
             else:
-                results = self.decoder.decode_v2(e_output, src_mask, model_lm, lm_weight)
+                results = self.decoder.decode_v2(e_output, src_mask, model_lm, lm_weight, model_lm_2, lm_weight_2, beam_width)
                 # decode_v2(self, hbatch, lengths, model_lm=None):
 
         return results
