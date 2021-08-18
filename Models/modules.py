@@ -32,27 +32,44 @@ class PositionalEncoder(nn.Module):
 
 class CNN_embedding_avepool(nn.Module):
     def __init__(self, hp):
-        super().__init__() 
+        super().__init__()
         idim = hp.mel_dim
         out_dim = hp.d_model_e
         cnn_dim = hp.cnn_dim
         self.subsampling_rate = hp.subsampling_rate
+
+        self.cnn_swish = hp.cnn_swish
+        if self.cnn_swish:
+            self.act = Swish()
+        else:
+            self.act = nn.ReLU()
 
         self.l1_flag = hp.l1_flag
         if self.l1_flag:
             self.l1 = nn.Linear(idim, 80) #cnn_dim)
             
         self.conv1 = nn.Conv2d(1, cnn_dim, 3, 1)
-        self.conv2 = nn.Conv2d(cnn_dim, cnn_dim, 3, 1)
         if self.l1_flag:
             hidden_dim = (80-2)//2
-            print(f'l1 is used for shape {hidden_dim}')
         else:
             hidden_dim = (idim-2)//2
-            print(f'l1 is NOT used for shape {hidden_dim}')
-        hidden_dim = (hidden_dim-2) // 2 #(idim-2) // 2
+
+        if self.subsampling_rate == 4:
+            self.conv2 = nn.Conv2d(cnn_dim, cnn_dim, 3, 1)
+            hidden_dim = (hidden_dim-2) // 2 #(idim-2) // 2
+        elif self.subsampling_rate == 8:
+            self.conv2 = nn.Conv2d(cnn_dim, cnn_dim, 3, 1)
+            hidden_dim = (hidden_dim-2) // 2 #(idim-2) // 2
+            self.conv3 = nn.Conv2d(cnn_dim, cnn_dim, 3, 1)
+            hidden_dim = (hidden_dim-2) // 2 #(idim-2) // 2
+        
         hidden_dim *= cnn_dim
+        print(f'CNN avepool shape is {hidden_dim}')
         self.out = nn.Linear(hidden_dim, out_dim)
+
+        self.cnn_ln = hp.cnn_ln
+        if self.cnn_ln:
+            self.ln = nn.LayerNorm(out_dim)
 
     def forward(self, x, x_mask):
         if self.l1_flag:
@@ -60,13 +77,27 @@ class CNN_embedding_avepool(nn.Module):
         else:
             x = x.unsqueeze(1)
 
-        x = F.relu(self.conv1(x))
+        x = self.act(self.conv1(x))
         x = F.avg_pool2d(x, kernel_size=2, stride=2)
-        x = F.relu(self.conv2(x))
-        x = F.avg_pool2d(x, kernel_size=2, stride=2)
+        x_mask_return = x_mask[:, :, :-3:2]
+        if self.subsampling_rate == 4:
+            x = self.act(self.conv2(x))
+            x = F.avg_pool2d(x, kernel_size=2, stride=2)
+            x_mask_return = x_mask_return[:, :, :-3:2]
+        elif self.subsampling_rate == 8:
+            x = self.act(self.conv2(x))
+            x = F.avg_pool2d(x, kernel_size=2, stride=2)
+            x_mask_return = x_mask_return[:, :, :-3:2]
+            x = self.act(self.conv3(x))
+            x = F.avg_pool2d(x, kernel_size=2, stride=2)
+            x_mask_return = x_mask_return[:, :, :-3:2]
+
         b, c, t, f = x.size()
         x = self.out(x.transpose(1, 2).contiguous().view(b, t, c * f))
-        return x, x_mask[:, :, :-3:2][:, :, :-3:2]
+        if self.cnn_ln:
+            x = self.ln(x)
+
+        return x, x_mask_return
 
 
 class CNN_embedding(nn.Module):

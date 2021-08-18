@@ -3,25 +3,23 @@
 decoding
 """
 import argparse
-import os
-import sys
-
-import numpy as np
 import math
-
+import numpy as np
+import os
 import sentencepiece as spm
+import soundfile as sf
+import sys
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
 
 from utils import hparams as hp
-from utils.utils import fill_variables, load_dat, load_lmfb_from_wav
+from utils.utils import fill_variables, load_dat
 import utils
-import time
-from Models.transformer import Transformer
-from Models.LM import Model_lm, TransformerLM
-
-from tools.calc_wer import wer
+#from Models.transformer import Transformer
+from Models.transformer_wav2vec2 import TransformerWav2vec2
+from Models.LM import Model_lm
+from transformers import Wav2Vec2Processor
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -87,7 +85,7 @@ def create_masks(src, trg, src_pad, trg_pad):
         trg_mask = None
     return src_mask, trg_mask
 
-def recognize(hp, model, script_file, model_lm, lm_weight, model_lm_2=None, lm_weight_2=None, calc_wer=False):
+def recognize(hp, model, script_file, model_lm, lm_weight, processor, calc_wer=False):
     # TODO: calculate wer
     sp = spm.SentencePieceProcessor()
     sp.Load(hp.spm_model)
@@ -100,83 +98,51 @@ def recognize(hp, model, script_file, model_lm, lm_weight, model_lm_2=None, lm_w
             script_buf.append(line)
     
     num_mb = len(script_buf) // BATCH_SIZE
-    results_all = np.zeros(5)
-    sil = np.load(hp.silence_file) if hp.silence_file is not None else None
-    start_time = time.time()
     for i in range(num_mb):
         xs = []
         lengths = []
         ts_lengths = []
         for j in range(BATCH_SIZE):
             s = script_buf[i*BATCH_SIZE+j].strip()
-            if len(s.split('|')) == 1:
+            if len(s.split(' ')) == 1:
                 x_file = s
             else:
-                x_file, laborg = s.split('|', 1)
-            if '.htk' in x_file:
-                cpudat = load_dat(x_file)
-                cpudat = cpudat[:, :hp.mel_dim]
+                x_file, laborg = s.split(' ', 1)
+            if '.wav' in x_file:
+                audio_input, sampling_rate = sf.read(x_file)
+                wav_input = processor(audio_input, sampling_rate=sampling_rate, return_tensors="pt").input_values
+                wav2vec2_length = math.floor((wav_input.shape[1] - 400) / 320.) + 1
+    
+            lengths.append(wav2vec2_length)
+            xs.append(wav_input)
 
-            elif '.wav' in x_file:
-                cpudat = load_lmfb_from_wav(hp, x_file)
-            elif '.npy' in x_file:
-                cpudat = np.load(x_file)
-            if sil is not None:
-                cpudat = np.vstack((cpudat, sil))
-            if hp.mean_utt:
-                cpudat = cpudat - cpudat.mean(axis=0, keepdims=True)
-            if hp.mean_file is not None and hp.var_file is not None:
-                mean = np.load(hp.mean_file).reshape(1, -1)
-                var = np.load(hp.var_file).reshape(1, -1)
-                cpudat = (cpudat - mean) / np.sqrt(var)
-
-            lengths.append(cpudat.shape[0])
-            xs.append(cpudat)
-
+        ## TODO: change preprocess
         xs_dummy = []
         src_pad = 0
         for i in range(len(xs)):
             xs_dummy.append([1] * lengths[i])
-        src_seq = np.zeros((BATCH_SIZE, max(lengths), hp.mel_dim))
-        for i in range(len(xs)):
-            src_seq[i, :lengths[i], :] = xs[i]
+        #src_seq = np.zeros((BATCH_SIZE, max(lengths), hp.mel_dim))
+        #for i in range(len(xs)):
+        #    src_seq[i, :lengths[i], :] = xs[i]
         src_seq_dummy = np.array([inst + [src_pad] * (max(lengths) - len(inst)) for inst in xs_dummy])
     
-        src_seq = torch.from_numpy(src_seq).to(DEVICE).float()
+        src_seq = torch.tensor(xs[0]).to(DEVICE).float()
         src_seq_dummy = torch.from_numpy(src_seq_dummy).to(DEVICE).long()
-        result_print = ''
-        if src_seq.shape[1] <= 10:
-            continue
-        if not calc_wer:
-            result_print = f"{x_file.strip()} "
-        if src_seq.shape[1] >= args.segment:
-            seg = args.segment - 100
-            for i in range(1, src_seq.shape[1] // (args.segment-100) + 2):
-                youtput_in_Variable = model.decode(src_seq[:, (i-1)*seg:i*seg], src_seq_dummy[:, (i-1)*seg:i*seg], hp.beam_width, model_lm, INIT_TOK, EOS_TOK, lm_weight)
+        ## TODO: adjust wav lengths
+        if False: #src_seq.shape[1] >= 2000:
+            print("{}".format(x_file.strip()), end =' ')
+            for i in range(1, src_seq.shape[1] // 1900 + 2):
+                youtput_in_Variable = model.decode(src_seq[:, (i-1)*1900:i*1900], src_seq_dummy[:, (i-1)*1900:i*1900], 10, model_lm, INIT_TOK, EOS_TOK, lm_weight)
                 if len(youtput_in_Variable) != 0:
-                    result_print += f"{sp.DecodeIds(youtput_in_Variable)} "
-                else:
-                    results_print = 'Dummy '
+                    print("{}".format(sp.DecodeIds(youtput_in_Variable)), end=' ')
+            print()
         else:
-            youtput_in_Variable = model.decode(src_seq, src_seq_dummy, hp.beam_width, model_lm, INIT_TOK, EOS_TOK, lm_weight, model_lm_2, lm_weight_2)
-            if len(youtput_in_Variable) != 0:
-                result_print += f"{sp.DecodeIds(youtput_in_Variable)}"
+            youtput_in_Variable = model.decode(src_seq, src_seq_dummy, 10, model_lm, INIT_TOK, EOS_TOK, lm_weight)
+            if len(youtput_in_Variable) == 0:
+                print("{}".format(x_file.strip()))
             else:
-                results_print = 'Dummy '
-
-        if not calc_wer:
-            print(result_print)
-            sys.stdout.flush()
-        else:
-            results_all += wer(laborg.split(), result_print.split())
-
-    print(f'elapsed time = {time.time() -start_time}')
-    if calc_wer:
-        wer_results_all = results_all[1:-1].sum()/ results_all[-1]
-        results_all = results_all.astype(np.int32)
-        print('WER {0:.2f}% [H={1:d}, D={2:d}, S={3:d}, I={4:d}, N={5:d}]'.format(results_all[1:-1].sum()/ results_all[-1] * 100, results_all[0], results_all[1], results_all[2], results_all[3], results_all[4]))
-    
-        #print('WER is ', wer_results_all)
+                print("{} {}".format(x_file.strip(), sp.DecodeIds(youtput_in_Variable)))
+        sys.stdout.flush()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -185,14 +151,7 @@ if __name__ == '__main__':
     parser.add_argument('--test_script', type=str, default=None)
     parser.add_argument('--load_name_lm', type=str, default=None)
     parser.add_argument('--lm_weight', type=float, default=0.2)
-    parser.add_argument('--load_name_lm_2', type=str, default=None)
-    parser.add_argument('--lm_weight_2', type=float, default=0.2)
-    parser.add_argument('--beam_width', type=int, default=None)
     parser.add_argument('--log_params', action='store_true')
-    parser.add_argument('--calc_wer', action='store_true')
-    parser.add_argument('--segment', type=int, default=10000)
-    parser.add_argument('--silence_file', type=str, default=None)
-    parser.add_argument('--lm_type', type=str, default='LSTM')
     args = parser.parse_args()
     hp_file = args.hp_file
     model_name = args.load_name # save dir name
@@ -205,21 +164,11 @@ if __name__ == '__main__':
     hp.configure(hp_file)
     fill_variables(hp)
     
-    setattr(hp, 'silence_file', args.silence_file)
-
-    if args.beam_width is not None:
-        print(f'beam width is set to {args.beam_width}')
-        hp.beam_width = args.beam_width
-        
-
     script_file = hp.eval_file
     if args.test_script is not None:
         script_file = args.test_script
 
-    if hp.lm_weight is not None:
-        args.lm_weight = hp.lm_weight
-    print(f'lm weight = {args.lm_weight}')
-    model = Transformer(hp)
+    model = TransformerWav2vec2(hp, pretrain_model='facebook/wav2vec2-large-lv60')
     model.to(DEVICE)
     model.eval()
 
@@ -231,10 +180,7 @@ if __name__ == '__main__':
         hp_LM_path = os.path.join(os.path.dirname(args.load_name_lm), 'hparams.py')
         hp_LM = utils.HParams()
         hp_LM.configure(hp_LM_path)
-        if args.lm_type == 'LSTM':
-            model_lm = Model_lm(hp_LM)
-        else:
-            model_lm = TransformerLM(hp_LM)
+        model_lm = Model_lm(hp_LM)
         model_lm.to(DEVICE)
         model_lm.load_state_dict(load_model(args.load_name_lm))
         model_lm.eval()
@@ -242,41 +188,17 @@ if __name__ == '__main__':
         model_lm = None
 
     if hp.load_name_lm is not None:
-        print(f'load {hp.load_name_lm}')
+        print(f'load {hp.load_name_lm} ')
         hp_LM_path = os.path.join(os.path.dirname(hp.load_name_lm), 'hparams.py')
         hp_LM = utils.HParams()
         hp_LM.configure(hp_LM_path)
-        if args.lm_type == 'LSTM':
-            model_lm = Model_lm(hp_LM)
-        else:
-            model_lm = TransformerLM(hp_LM)
+        model_lm = Model_lm(hp_LM)
         model_lm.to(DEVICE)
         model_lm.load_state_dict(load_model(hp.load_name_lm))
         model_lm.eval()
 
-
-    if args.load_name_lm_2 is not None:
-        print(f'load {args.load_name_lm_2}')
-        hp_LM_path = os.path.join(os.path.dirname(args.load_name_lm_2), 'hparams.py')
-        hp_LM = utils.HParams()
-        hp_LM.configure(hp_LM_path)
-        model_lm_2 = Model_lm(hp_LM)
-        model_lm_2.to(DEVICE)
-        model_lm_2.load_state_dict(load_model(args.load_name_lm_2))
-        model_lm_2.eval()
-    else:
-        model_lm_2 = None
-
-    if hp.load_name_lm_2 is not None:
-        print(f'load {hp.load_name_lm}')
-        hp_LM_path = os.path.join(os.path.dirname(hp.load_name_lm_2), 'hparams.py')
-        hp_LM = utils.HParams()
-        hp_LM.configure(hp_LM_path)
-        model_lm_2 = Model_lm(hp_LM)
-        model_lm_2.to(DEVICE)
-        model_lm_2.load_state_dict(load_model(hp.load_name_lm_2))
-        model_lm_2.eval()
-
     model.load_state_dict(load_model(model_name))
     
-    recognize(hp, model, script_file, model_lm, args.lm_weight, model_lm_2, args.lm_weight_2, calc_wer=args.calc_wer)
+    processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-large-lv60")
+
+    recognize(hp, model, script_file, model_lm, args.lm_weight, processor=processor)

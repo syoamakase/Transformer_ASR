@@ -1,203 +1,81 @@
 # -*- coding: utf-8 -*-
 import argparse
-import math
 import numpy as np
 import pandas as pd
 #import librosa
+import soundfile as sf
 from operator import itemgetter
 from typing import Optional
 import collections
 import os
-import random
-from struct import unpack, pack
 import torch
 from torch.utils.data import Dataset, DataLoader, SequentialSampler, Sampler
 from torch.utils.data.distributed import DistributedSampler
 import sentencepiece as spm
 from tqdm import tqdm
+import math
 
+from transformers import Wav2Vec2Processor
 
 class TrainDatasets(Dataset):
     """
     Dataset class.
     """
-    def __init__(self, csv_file, hp, root_dir=None, spec_aug=False, feat_norm=[None, None]):
-        """
-        Args:                                                                   
-            csv_file (string): Path to the csv file with annotations.           
-            root_dir (string): Directory with all the wavs.                     
-                                                                                
-        """
-        # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)
-          
-        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
-        self.hp = hp
-        self.root_dir = root_dir
-        self.sp = spm.SentencePieceProcessor()
-        self.sp.Load(self.hp.spm_model)
-        self.spec_aug = spec_aug
-        self.dev_mode = hp.dev_mode
-
-        self.mean_utt = hp.mean_utt
-        if feat_norm[0] is not None:
-            self.feat_norm = True
-            self.mean = np.load(feat_norm[0]).reshape(self.hp.mel_dim)
-            self.var = np.load(feat_norm[1]).reshape(self.hp.mel_dim)
-        else:
-            self.feat_norm = False
-
-        if self.hp.lengths_file is None or not os.path.exists(self.hp.lengths_file):
-            print('lengths_file is not exists. Make...')
-            lengths_list = []
-            pbar = tqdm(range(len(self.landmarks_frame)))
-            for idx in pbar:
-                mel_name = self.landmarks_frame.loc[idx, 0]
-                if '.htk' in mel_name:
-                    mel_input = self.load_htk(mel_name)
-                    mel_length = mel_input.shape[0]
-                elif '.npy' in mel_name:
-                    mel_input = np.load(mel_name)
-                    mel_length = mel_input.shape[0]
-                #mel_length = int(self.landmarks_frame.loc[idx, 2])
-                length = mel_length
-                lengths_list.append(length)
-                
-            self.lengths_np = np.array(lengths_list)
-            np.save(self.hp.lengths_file, self.lengths_np)
-
-    def load_htk(self, filename):
-        fh = open(filename, "rb")
-        spam = fh.read(12)
-        _, _, sampSize, _ = unpack(">IIHH", spam)
-        veclen = int(sampSize / 4)
-        fh.seek(12, 0)
-        dat = np.fromfile(fh, dtype='float32')
-        dat = dat.reshape(int(len(dat) / veclen), veclen)
-        dat = dat.byteswap()
-        fh.close()
-        return dat                       
-
-    def _freq_mask(self, spec, F=10, num_masks=1, replace_with_zero=False, random_mask=False, granularity=1):
-        cloned = spec.clone()
-        num_mel_channels = cloned.shape[1]
-        for i in range(0, num_masks):
-            f = random.randrange(0, F, granularity)
-            if random_mask:
-                sample = np.arange(0, num_mel_channels)
-                masks = random.sample(list(sample), f)
-                if (replace_with_zero): cloned[:, masks] = 0
-                else: cloned[:, masks] = cloned.mean()
-            else:
-                f_zero = random.randrange(0, num_mel_channels - f)
-                # avoids randrange error if values are equal and range is empty
-                if (f_zero == f_zero + f*granularity): return cloned
-                mask_end = random.randrange(f_zero, f_zero + f, granularity)
-                if (replace_with_zero): cloned[:, f_zero:mask_end] = 0
-                else: cloned[:, f_zero:mask_end] = cloned.mean()
-        return cloned
-    
-    def _time_mask(self, spec, T=50, num_masks=1, replace_with_zero=False, random_mask=False):
-        cloned = spec.clone()
-        len_spectro = cloned.shape[0]
-
-        for i in range(0, num_masks):
-            t = random.randrange(0, T)
-            t_zero = random.randrange(0, len_spectro - t)
-    
-            # avoids randrange error if values are equal and range is empty
-            if (t_zero == t_zero + t): return cloned
-    
-            mask_end = random.randrange(t_zero, t_zero + t)
-            if (replace_with_zero): cloned[t_zero:mask_end,:] = 0
-            else: cloned[t_zero:mask_end,:] = cloned.mean()
-        return cloned
-                                                                                
-    def __len__(self):                                                          
-        return len(self.landmarks_frame)                                        
-                                                                                
-    def __getitem__(self, idx): 
-        mel_name = self.landmarks_frame.loc[idx, 0]
-        text_raw = self.landmarks_frame.loc[idx, 1].strip()
-                                                                                
-        # text = np.asarray(text_to_sequence(text, [self.hp.cleaners]), dtype=np.int32)
-        textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text_raw) + [self.sp.eos_id()]
-        text = np.array([int(t) for t in textids], dtype=np.int32)
-        if '.htk' in mel_name:
-            mel_input = self.load_htk(mel_name)
-            mel_length = mel_input.shape[0]
-        elif '.npy' in mel_name:
-            mel_input = np.load(mel_name)
-            mel_length = mel_input.shape[0]
-
-        if self.mean_utt:
-            mel_input = mel_input - mel_input.mean(axis=0, keepdims=True)
-
-        if self.feat_norm:
-            mel_input = (mel_input - self.mean) / np.sqrt(self.var)
-
-        if self.spec_aug:
-            mel_input = torch.from_numpy(mel_input)
-            num_T = min(20, math.floor(0.04*mel_length))
-            T = math.floor(0.04*mel_length)
-            #T = min(mel_input.shape[0] // 2 - 1, 100)
-            #mel_input = time_warp(self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2,replace_with_zero=True))
-            #mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2, replace_with_zero=True)
-            mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=self.hp.num_F, replace_with_zero=True, random_mask=self.hp.random_mask, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
-            mel_length = mel_input.shape[0]
-        # mel_input = np.concatenate([np.zeros([1,self.hp.num_mels], np.float32), mel[:-1,:]], axis=0)
-        text_length = len(text)                                                 
-        pos_text = np.arange(1, text_length + 1)
-        pos_mel = np.arange(1, mel_input.shape[0] + 1) 
-        #assert (mel_length-2)//4 > text_length, f'mel_length of {mel_name}={(mel_length-2)//4} is shorter than text_length={text_length}'
-        if (((mel_length-2)//2)-2)//2 <= text_length:
-            print(mel_name)
-
-        if self.dev_mode:
-            if 'tts_augment':
-                # 0 means tts
-                real_flag = 0
-            else:
-                real_flag = 1
-            sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'real_flag':real_flag, 'dev_mode':self.dev_mode}
-        else:
-            sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'dev_mode':self.dev_mode}
-                                                                                
-        return sample
-
-class TrainLMDatasets(Dataset):
-    """
-    Dataset class.
-    """
-    def __init__(self, csv_file, hp, root_dir=None, spec_aug=False, feat_norm=[None, None]):
+    def __init__(self, csv_file, hp):
         """
         Args:
             csv_file (string): Path to the csv file with annotations.
             root_dir (string): Directory with all the wavs.
         """
-        # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
         self.hp = hp
-        self.root_dir = root_dir
         self.sp = spm.SentencePieceProcessor()
         self.sp.Load(self.hp.spm_model)
-        self.spec_aug = spec_aug
+        ## TODO: variable
+        self.processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-large-lv60")
+
+        ## TODO
+        if self.hp.lengths_file is None or not os.path.exists(self.hp.lengths_file):
+            print('lengths_file is not exists. Make...')
+            lengths_list = []
+            pbar = tqdm(range(len(self.landmarks_frame)))
+            for idx in pbar:
+                wav_name = self.landmarks_frame.loc[idx, 0]
+                audio_input, sampling_rate = sf.read(wav_name)
+                wav_input = self.processor(audio_input, sampling_rate=sampling_rate, return_tensors="pt").input_values
+                ## TODO: check calucation for lengths (int(wav_input.shape[1]//320))
+                # [1, lengths of wav] -> [lengths of wav]
+                wav2vec2_length = math.floor((wav_input.shape[1] - 400) / 320.) + 1
+                
+                lengths_list.append(wav2vec2_length)
+                
+            self.lengths_np = np.array(lengths_list)
+            np.save(self.hp.lengths_file, self.lengths_np)
 
     def __len__(self):                                                          
-        return len(self.landmarks_frame)
-                                        
-    def __getitem__(self, idx):
-        #mel_name = self.landmarks_frame.loc[idx, 0]
-        text_raw = str(self.landmarks_frame.loc[idx, 0]).strip()
-
+        return len(self.landmarks_frame)                                        
+                                                                                
+    def __getitem__(self, idx): 
+        wav_name = self.landmarks_frame.loc[idx, 0]
+        text_raw = self.landmarks_frame.loc[idx, 1].strip()
+                                                                                
         textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text_raw) + [self.sp.eos_id()]
         text = np.array([int(t) for t in textids], dtype=np.int32)
+
+        audio_input, sampling_rate = sf.read(wav_name)
+        wav_input = self.processor(audio_input, sampling_rate=sampling_rate, return_tensors="pt").input_values
+        ## TODO: check calucation for lengths (int(wav_input.shape[1]//320))
+        # [1, lengths of wav] -> [lengths of wav]
+        wav_input = wav_input.squeeze(0)
+        wav2vec2_length = math.floor((wav_input.shape[0] - 400) / 320.) + 1
+
         text_length = len(text)
         pos_text = np.arange(1, text_length + 1)
+        pos_wav2vec2 = np.arange(1, wav2vec2_length + 1)
 
-        sample = {'text': text, 'text_length':text_length, 'pos_text':pos_text}
-                                                                                
+        sample = {'text': text, 'text_length':text_length, 'wav_input':wav_input, 'wav2vec2_length':wav2vec2_length, 
+                 'pos_wav2vec2':pos_wav2vec2, 'pos_text':pos_text}                               
         return sample
-
 
 # class TestDatasets(Dataset):
 #     """
@@ -205,8 +83,8 @@ class TrainLMDatasets(Dataset):
 
 #     """                                                   
 #     def __init__(self, csv_file, root_dir=None):
-#         """                                                                     
-#         Args:                                                                   
+#         """                                                                
+#         Args:
 #             csv_file (string): Path to the csv file with annotations.           
 #             root_dir (string): Directory with all the wavs.                     
                                                                                 
@@ -214,21 +92,6 @@ class TrainLMDatasets(Dataset):
 #         # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)  
 #         self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)
 #         self.root_dir = root_dir 
-                                                                                
-#     def load_wav(self, filename):                                               
-#         return librosa.load(filename, sr=self.hp.sample_rate) 
-
-#     def load_htk(self, filename):
-#         fh = open(filename, "rb")
-#         spam = fh.read(12)
-#         _, _, sampSize, _ = unpack(">IIHH", spam)
-#         veclen = int(sampSize / 4)
-#         fh.seek(12, 0)
-#         dat = np.fromfile(fh, dtype='float32')
-#         dat = dat.reshape(int(len(dat) / veclen), veclen)
-#         dat = dat.byteswap()
-#         fh.close()
-#         return dat 
                                                                                 
 #     def __len__(self):                                                          
 #         return len(self.landmarks_frame)                                        
@@ -248,54 +111,23 @@ class TrainLMDatasets(Dataset):
                                                                                 
 #         return sample
 
-def collate_fn_LM(batch):
-    # Puts each data field into a tensor with outer dimension batch size
-    if isinstance(batch[0], collections.abc.Mapping):
-        text = [d['text'] for d in batch]
-        text_length = [d['text_length'] for d in batch]
-        pos_text = [d['pos_text'] for d in batch]
-        
-        text = _prepare_data(text).astype(np.int32)
-        pos_text = _prepare_data(pos_text).astype(np.int32)
-
-        return torch.LongTensor(text), torch.LongTensor(pos_text), torch.LongTensor(text_length)
-
-    raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}"
-                     .format(type(batch[0]))))
-
-
 def collate_fn(batch):
-    # Puts each data field into a tensor with outer dimension batch size
     if isinstance(batch[0], collections.abc.Mapping):
         text = [d['text'] for d in batch]
-        mel_input = [d['mel_input'] for d in batch]
-        mel_lengths = [d['mel_length'] for d in batch]
-        text_length = [d['text_length'] for d in batch]
-        pos_mel = [d['pos_mel'] for d in batch]
+        wav_input = [d['wav_input'] for d in batch]
+        wav2vec2_lengths = [d['wav2vec2_length'] for d in batch]
+        text_lengths = [d['text_length'] for d in batch]
+        pos_wav2vec2 = [d['pos_wav2vec2'] for d in batch]
         pos_text = [d['pos_text'] for d in batch]
-        dev_mode = batch[0]['dev_mode']
-
-        if dev_mode:
-            real_flag = [d['real_flag'] for d in batch]
         
-        #text = [i for i,_ in sorted(zip(text, text_length), key=lambda x: x[1], reverse=True)]
-        #mel_input = [i for i, _ in sorted(zip(mel_input, text_length), key=lambda x: x[1], reverse=True)]
-        #pos_text = [i for i, _ in sorted(zip(pos_text, text_length), key=lambda x: x[1], reverse=True)]
-        #pos_mel = [i for i, _ in sorted(zip(pos_mel, text_length), key=lambda x: x[1], reverse=True)]
-        #text_length = sorted(text_length, reverse=True)
-        # PAD sequences with largest length of the batch
         text = _prepare_data(text).astype(np.int32)
-        mel_input = _pad_mel(mel_input)
-        pos_mel = _prepare_data(pos_mel).astype(np.int32)
+        wav_input = _pad_wav(wav_input)
+        pos_wav2vec2 = _prepare_data(pos_wav2vec2).astype(np.int32)
         pos_text = _prepare_data(pos_text).astype(np.int32)
 
-        if dev_mode:
-            return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_lengths), torch.LongTensor(real_flag)
-        else:
-            return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_lengths)
+        return torch.LongTensor(text), torch.FloatTensor(wav_input), torch.LongTensor(pos_text), torch.LongTensor(pos_wav2vec2), \
+               torch.LongTensor(text_lengths), torch.LongTensor(wav2vec2_lengths)
 
-    raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}"
-                     .format(type(batch[0]))))
 
 def _pad_data(x, length):
     _pad = 0
@@ -305,24 +137,12 @@ def _prepare_data(inputs):
     max_len = max((len(x) for x in inputs))
     return np.stack([_pad_data(x, max_len) for x in inputs])
 
-def _pad_per_step(inputs):
-    timesteps = inputs.shape[-1]
-    return np.pad(inputs, [[0,0],[0,0],[0, self.self.hp.outputs_per_step - (timesteps % self.hp.outputs_per_step)]], mode='constant', constant_values=0.0)
-
-def get_param_size(model):
-    params = 0
-    for p in model.parameters():
-        tmp = 1
-        for x in p.size():
-            tmp *= x
-        params += tmp
-    return params
-
-def _pad_mel(inputs):
+def _pad_wav(inputs):
+    ## NOTE: change shapes
     _pad = 0
     def _pad_one(x, max_len):
-        mel_len = x.shape[0]
-        return np.pad(x, [[0,max_len - mel_len],[0,0]], mode='constant', constant_values=_pad)
+        wav_len = x.shape[0]
+        return np.pad(x, [0, max_len - wav_len], mode='constant', constant_values=_pad)
     max_len = max((x.shape[0] for x in inputs))
     return np.stack([_pad_one(x, max_len) for x in inputs])
 
@@ -486,7 +306,7 @@ class NumBatchSampler(Sampler):
     """
     def __init__(self, dataset, batch_size, drop_last=True):
         self.batch_size = batch_size
-        self.drop_last = drop_last 
+        self.drop_last = drop_last
         self.dataset_len = len(dataset)
         self.all_indices = self._batch_indices()
         np.random.shuffle(self.all_indices)
@@ -507,13 +327,7 @@ class NumBatchSampler(Sampler):
     def __len__(self):
         return len(self.all_indices)
 
-def get_dataset(script_file, hp, spec_aug=True, feat_norm=[None, None]):
-    #print('script_file = {}'.format(script_file))
-    #print('spec_auc = {}'.format(spec_aug))
-    #print('feat norm = {}'.format(feat_norm))
-    return TrainDatasets(script_file, hp, spec_aug=spec_aug, feat_norm=feat_norm)
-
-if __name__ == '__main__':
+def main():
     from utils import hparams as hp
     parser = argparse.ArgumentParser()
     parser.add_argument('--hp_file', metavar='FILE', default='hparams.py')
@@ -531,11 +345,13 @@ if __name__ == '__main__':
     from tqdm import tqdm
     pbar = tqdm(dataloader)
     for d in pbar:
-        text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
+        text, wav_input, pos_text, pos_wav2vec2, text_lengths, wav2vec2_lengths = d
 
         text = text.to(DEVICE, non_blocking=True)
-        mel_input = mel_input.to(DEVICE, non_blocking=True)
+        wav_input = wav_input.to(DEVICE, non_blocking=True)
         pos_text = pos_text.to(DEVICE, non_blocking=True)
-        pos_mel = pos_mel.to(DEVICE, non_blocking=True)
+        pos_wav2vec2 = pos_wav2vec2.to(DEVICE, non_blocking=True)
         text_lengths = text_lengths.to(DEVICE, non_blocking=True)
-        #print(d[1].shape)
+
+if __name__ == '__main__':
+    main()
