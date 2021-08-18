@@ -10,7 +10,6 @@ Models_dev/
 *network*
 models.nwork*
 mlruns/
-train_optuna_v2.py
 nohup.out
 predict_2.txt
 predict.txt
