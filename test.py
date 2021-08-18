@@ -121,7 +121,6 @@ def recognize(hp, model, script_file, model_lm, lm_weight, model_lm_2=None, lm_w
                 cpudat = load_lmfb_from_wav(hp, x_file)
             elif '.npy' in x_file:
                 cpudat = np.load(x_file)
-    
             if sil is not None:
                 cpudat = np.vstack((cpudat, sil))
             if hp.mean_utt:

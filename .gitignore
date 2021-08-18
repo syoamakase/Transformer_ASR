@@ -1,7 +1,31 @@
 
+## Now developing
+train_wav2vec2_ctc_2.py
+*.prev
+Models_dev/
+
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 
+*network*
+models.nwork*
+mlruns/
+train_optuna_v2.py
+nohup.out
+predict_2.txt
+predict.txt
+optuna.sh
+train.sh
+train_slurm.sh
+train_abci.py
+test_slurm.sh
+src.average_checkpoints
+send_message.sh
+send_message.py
+prev_version/
+send_results.py
+slurm*.out
+tmp.txt
 ### Python ###
 # Byte-compiled / optimized / DLL files
 __pycache__/
