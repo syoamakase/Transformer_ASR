@@ -1,0 +1,4 @@
+torch
+tensorboard
+librosa
+sentencepiece
