@@ -1,34 +1,31 @@
 #-*- coding: utf-8 -*-
-# test comment
 import argparse
 import os
 import sys
 import time
 
-import copy
 import random
 import numpy as np
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
 
 from tqdm import tqdm
 import datasets
 import torch.multiprocessing as mp
-import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-#from warprnnt_pytorch import rnnt_loss
-#from warp_rnnt import rnnt_loss
+#from warprnnt_pytorch import RNNTLoss 
+## Use it
+from warp_rnnt import rnnt_loss
 from train_optuna_v2 import recognize
 
 import torch.distributed as dist
 
 from utils import hparams as hp
-from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight, frame_stacking
+from utils.utils import log_config, fill_variables, adjust_learning_rate, load_model, create_masks, init_weight, frame_stacking, get_learning_rate
 from Models.transformer import Transformer
 
 random.seed(77)
@@ -36,13 +33,6 @@ torch.random.manual_seed(777)
 torch.cuda.manual_seed_all(777)
 np.random.seed(777)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
-def get_learning_rate(step, hp):
-    warmup_step = hp.warmup_step #hp.warmup_step # 4000
-    warmup_factor = hp.warmup_factor #hp.warmup_factor #10.0 # 1.0
-    d_model = hp.d_model_e
-    return warmup_factor * min(step ** -0.5, step * warmup_step ** -1.5) * (d_model ** -0.5)
 
 
 def average_gradients(model):
@@ -66,7 +56,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
         if epoch >= hp.decay_epoch:
             lr = adjust_learning_rate(optimizer, epoch, hp.decay_epoch)
         else:
-            lr = get_learning_rate(step//hp.accum_grad+1, hp)
+            lr = get_learning_rate(step//hp.accum_grad+1, warmup_step=hp.warmup_step, warmup_factor=hp.warmup_factor, d_model=hp.d_model_e)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
     else:
@@ -97,20 +87,25 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
         else:
             text_input = text[:, :-1]
             src_mask, trg_mask = create_masks(pos_mel, pos_text[:, :-1])
-    
+
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             if args.n_gpus > 1:
                 dist.barrier()
             if hp.dev_mode:
                 youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask, real_flag)
             else:
-                youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc = model(mel_input, text_input, src_mask, trg_mask)
+                youtputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc, iter_preds = model(mel_input, text_input, src_mask, trg_mask)
     
             print('step {} {}'.format(step, train_len))
             print('batch size = {}'.format(batch_size))
             print('lr = {}'.format(lr))
 
+            if hp.use_lm_loss:
+                lm_outputs = youtputs[1]
+                youtputs = youtputs[0]
+                
             if hp.decoder == 'LSTM' or hp.decoder.lower() == 'transformer':
+
                 loss_att = 0.0
                 # cross entropy
                 if label_smoothing:
@@ -140,7 +135,6 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 print('loss_att =', loss_att.item())
                 loss = loss_att
 
-
             elif hp.decoder.lower() == 'transducer':
                 mel_lengths_downsample = mel_lengths 
                 for i in range(int(np.log2(hp.subsampling_rate))):
@@ -153,6 +147,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
                 print(f'loss_transducer = {loss_transducer.item()}')
                 loss = loss_transducer
+
 
             elif hp.decoder == 'ctc':
                 predict_ts_ctc = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
@@ -177,8 +172,39 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss_ctc = F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0)
                 print('loss_ctc = {}'.format(loss_ctc.item()))
                 if not torch.isinf(loss_ctc):
-                    loss = (hp.mlt_weight * loss + (1 - hp.mlt_weight) * loss_ctc)
+                    loss = (hp.mtl_weight * loss + (1 - hp.mtl_weight) * loss_ctc)
 
+            if hp.use_lm_loss:
+                loss_lm = 0.0
+                if hp.decoder == 'transducer':
+                    ys = text.contiguous().view(-1, 1)
+                else:
+                    ys = text[:, 1:].contiguous().view(-1, 1)
+                B, T, L = lm_outputs.shape
+                eps = hp.eps_lm_loss
+                log_prob = F.log_softmax(lm_outputs, dim=2)
+                onehot = torch.zeros((B * T, L), dtype=torch.float).to(DEVICE).scatter_(1, ys, 1)
+                onehot = onehot * (1 - 0.1) + (1 - onehot) * 0.1 / (youtputs.size(2) - 1)
+                onehot = onehot.reshape(B, T, L)
+                for i, t in enumerate(text_lengths):
+                    if hp.decoder == 'transducer':
+                        len_t = t - 1
+                    else:
+                        len_t = t
+                    loss_lm += -(onehot[i, :len_t, :] * log_prob[i, :len_t, :]).sum() / len_t
+                loss_lm /= batch_size
+                
+                print(f'loss_lm = {loss_lm}')
+                loss += 0.5 * loss_lm
+
+            ## iterative loss
+            if len(hp.iter_loss) != 0:
+                loss_ctc_iter = 0
+                for iter_pred in iter_preds:
+                    loss_ctc_iter += F.ctc_loss(predict_ts_ctc, text, mel_lengths_downsample, text_lengths, blank=0)
+                print(f'loss_ctc_iter = {loss_ctc_iter.item()}')
+                if not torch.isinf(loss_ctc_iter):
+                    loss += 0.3 * loss_ctc_iter
 
             step += 1
             print('loss =', loss.item())
@@ -212,7 +238,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
             if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
                 if epoch < hp.decay_epoch:
-                    lr = get_learning_rate(step // hp.accum_grad + 1, hp)
+                    lr = get_learning_rate(step//hp.accum_grad+1, warmup_step=hp.warmup_step, warmup_factor=hp.warmup_factor, d_model=hp.d_model_e)
+
                     for param_group in optimizer.param_groups:
                         param_group['lr'] = lr
         else:
@@ -377,7 +404,7 @@ def run_training(rank, args, hp, port=None):
             loaded_dict = torch.load("{}".format(os.path.join(load_dir, 'network.optimizer.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
             optimizer.load_state_dict(loaded_dict)
             step = loaded_dict['state'][0]['step'] * hp.accum_grad
-            lr = get_learning_rate(step//hp.accum_grad+1, hp)
+            lr = get_learning_rate(step//hp.accum_grad+1, warmup_step=hp.warmup_step, warmup_factor=hp.warmup_factor, d_model=hp.d_model_e)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
             del loaded_dict

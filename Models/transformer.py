@@ -50,6 +50,7 @@ class Transformer(nn.Module):
             self.encoder = ConformerEncoder(hp)
         else:
             self.encoder = Encoder(hp)
+
         if self.decoder_type.lower() == 'transformer':
             self.decoder = Decoder(hp)
             self.out = nn.Linear(self.d_model_d, self.trg_vocab)
@@ -75,7 +76,7 @@ class Transformer(nn.Module):
         else:
             src = self.embedder(src)
 
-        e_outputs, attn_enc_enc = self.encoder(src, src_mask)
+        e_outputs, attn_enc_enc, iter_preds = self.encoder(src, src_mask)
         if self.decoder_type.lower() == 'transformer':
             d_output, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs, src_mask, trg_mask)
             outputs = self.out(d_output)
@@ -83,7 +84,9 @@ class Transformer(nn.Module):
             ctc_outputs = self.out(e_outputs)
             outputs, attn_dec_dec, attn_dec_enc = None, None, None
         elif self.decoder_type.lower() == 'transducer':
-            outputs, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs)
+            #outputs = self.decoder(trg, e_outputs, trg_mask)
+            outputs = self.decoder(trg, e_outputs)
+            attn_dec_dec, attn_dec_enc = None, None
         else:
             d_output, attn_dec_dec, attn_dec_enc = self.decoder(trg, e_outputs, src_mask, trg_mask)
             outputs = d_output
@@ -92,7 +95,7 @@ class Transformer(nn.Module):
             ctc_outputs = self.out_ctc(e_outputs)
         else:
             ctc_outputs = None
-        return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc
+        return outputs, ctc_outputs, attn_enc_enc, attn_dec_dec, attn_dec_enc, iter_preds
 
     @torch.no_grad()
     def decode(self, src, src_dummy, beam_width=10, model_lm=None, init_tok=2, eos_tok=1, lm_weight=0.2, model_lm_2=None, lm_weight_2=0.2):
@@ -105,7 +108,7 @@ class Transformer(nn.Module):
                 src, src_mask = frame_stacking(src, src_mask, self.hp.frame_stacking)
                 src = self.embedder(src)
 
-            e_output, _ = self.encoder(src, src_mask)
+            e_output, _, _ = self.encoder(src, src_mask)
 
             if self.decoder_type.lower() == 'transformer':
                 results = self._decode_tranformer_decoder(e_output, src_mask, beam_width, model_lm, init_tok, eos_tok, lm_weight)
@@ -123,8 +126,12 @@ class Transformer(nn.Module):
                 results = results_batch
             elif self.decoder_type.lower() == 'transducer':
                 results = self.decoder.decode(e_output)
+                #results = self.decoder.decode_v2(e_output, src_mask)
             else:
-                results = self.decoder.decode_v2(e_output, src_mask, model_lm, lm_weight, model_lm_2, lm_weight_2, beam_width)
+                results = self.decoder.decode_v3(e_output, src_mask, model_lm, lm_weight, model_lm_2, lm_weight_2, beam_width)
+                #results = self.decoder.decode_v2(e_output, src_mask, model_lm, lm_weight, model_lm_2, lm_weight_2, beam_width)
+                #ctc_out = self.out_ctc(e_output)
+                #results = self.decoder.joint_ctc_decoding(e_output, src_mask, ctc_out, model_lm, lm_weight, beam_width=beam_width)
                 # decode_v2(self, hbatch, lengths, model_lm=None):
 
         return results

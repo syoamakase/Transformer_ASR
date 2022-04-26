@@ -155,14 +155,18 @@ def recognize(hp, model, script_file, model_lm, lm_weight, model_lm_2=None, lm_w
                 youtput_in_Variable = model.decode(src_seq[:, (i-1)*seg:i*seg], src_seq_dummy[:, (i-1)*seg:i*seg], hp.beam_width, model_lm, INIT_TOK, EOS_TOK, lm_weight)
                 if len(youtput_in_Variable) != 0:
                     result_print += f"{sp.DecodeIds(youtput_in_Variable)} "
-                else:
-                    results_print = 'Dummy '
         else:
             youtput_in_Variable = model.decode(src_seq, src_seq_dummy, hp.beam_width, model_lm, INIT_TOK, EOS_TOK, lm_weight, model_lm_2, lm_weight_2)
             if len(youtput_in_Variable) != 0:
                 result_print += f"{sp.DecodeIds(youtput_in_Variable)}"
-            else:
-                results_print = 'Dummy '
+            # segment the speech in evaluation
+            elif src_seq.shape[1] > 1000:
+                seg = 1000 - 100
+                for i in range(1, src_seq.shape[1] // (args.segment-100) + 2):
+                    youtput_in_Variable = model.decode(src_seq[:, (i-1)*seg:i*seg], src_seq_dummy[:, (i-1)*seg:i*seg], hp.beam_width, model_lm, INIT_TOK, EOS_TOK, lm_weight)
+                    if len(youtput_in_Variable) != 0:
+                        result_print += f"{sp.DecodeIds(youtput_in_Variable)} "
+                
 
         if not calc_wer:
             print(result_print)
@@ -184,7 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--hp_file', type=str, default=None)
     parser.add_argument('--test_script', type=str, default=None)
     parser.add_argument('--load_name_lm', type=str, default=None)
-    parser.add_argument('--lm_weight', type=float, default=0.2)
+    parser.add_argument('--lm_weight', type=float, default=None)
     parser.add_argument('--load_name_lm_2', type=str, default=None)
     parser.add_argument('--lm_weight_2', type=float, default=0.2)
     parser.add_argument('--beam_width', type=int, default=None)
@@ -210,14 +214,17 @@ if __name__ == '__main__':
     if args.beam_width is not None:
         print(f'beam width is set to {args.beam_width}')
         hp.beam_width = args.beam_width
-        
 
     script_file = hp.eval_file
     if args.test_script is not None:
         script_file = args.test_script
 
     if hp.lm_weight is not None:
-        args.lm_weight = hp.lm_weight
+        if args.lm_weight is None:
+            args.lm_weight = hp.lm_weight
+        else:
+            print(f'lm_weight {args.lm_weight} on args is used')        
+
     print(f'lm weight = {args.lm_weight}')
     model = Transformer(hp)
     model.to(DEVICE)
