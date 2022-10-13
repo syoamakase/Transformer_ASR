@@ -320,7 +320,7 @@ def fill_variables(hp, verbose=True):
             setattr(hp, key, value)
 
     dev_var = {'swish_lstm':False, 'norm_lstm':False, 'load_name_lm_2':None, 'weight_dropout':None, 'dev_mode': None, 'iter_loss':[], 'decoder_swish':False, 'use_lm_loss':False, 'eps_lm_loss': 0.0, 'n_model_d':2, 
-               'use_aux_transducer_loss':False, 'use_symm_kl_div_loss':False, 'separate_tts_specaugment': False}
+               'use_aux_transducer_loss':False, 'use_symm_kl_div_loss':False, 'separate_tts_specaugment': True, 'batchnorm_momentum':0.1}
     for key, value in dev_var.items():
         if not hasattr(hp, key):
             if verbose:
