@@ -19,7 +19,10 @@ from torch.utils.data.distributed import DistributedSampler
 
 #from warprnnt_pytorch import RNNTLoss 
 ## Use it
-from warp_rnnt import rnnt_loss
+if torch.__version__ == '1.12.0+cu116' or torch.__version__ == '1.12.1+cu116':
+    from torchaudio.functional import rnnt_loss
+else:
+    from warp_rnnt import rnnt_loss
 from train_optuna_v2 import recognize
 
 import torch.distributed as dist
@@ -52,7 +55,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
     local_time = time.time()
     device = f'cuda:{rank}'
     label_smoothing = True
-    if hp.optimizer_type == 'Noam':
+    if hp.optimizer_type == 'Noam' or hp.optimizer_type == 'AdamW':
         if epoch >= hp.decay_epoch:
             lr = adjust_learning_rate(optimizer, epoch, hp.decay_epoch)
         else:
@@ -236,7 +239,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip)
                     optimizer.step()
 
-            if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
+            if step % hp.accum_grad == 0 and (hp.optimizer_type == 'Noam' or hp.optimizer_type == 'AdamW'):
                 if epoch < hp.decay_epoch:
                     lr = get_learning_rate(step//hp.accum_grad+1, warmup_step=hp.warmup_step, warmup_factor=hp.warmup_factor, d_model=hp.d_model_e)
 
@@ -250,7 +253,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             #loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(epoch))), map_location=map_location)
             #model.load_state_dict(loaded_dict)
             sys.exit(1)
-        if step % hp.accum_grad == 0 and hp.optimizer_type == 'Noam':
+        if step % hp.accum_grad == 0 and (hp.optimizer_type == 'Noam' or hp.optimizer_type == 'AdamW'):
             optimizer.zero_grad()
         sys.stdout.flush()
         # calc
@@ -372,6 +375,9 @@ def run_training(rank, args, hp, port=None):
     max_lr = hp.init_lr
     if hp.optimizer_type == 'Noam':
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.98), eps=1e-9)
+    elif hp.optimizer_type == 'AdamW':
+        optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, betas=(0.9, 0.98), eps=1e-9)
+        print(optimizer)
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr)
     

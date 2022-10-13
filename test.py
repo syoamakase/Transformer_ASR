@@ -261,7 +261,6 @@ if __name__ == '__main__':
         model_lm.load_state_dict(load_model(hp.load_name_lm))
         model_lm.eval()
 
-
     if args.load_name_lm_2 is not None:
         print(f'load {args.load_name_lm_2}')
         hp_LM_path = os.path.join(os.path.dirname(args.load_name_lm_2), 'hparams.py')

@@ -50,12 +50,12 @@ class EncoderLayer(nn.Module):
         return x, attn_enc_enc
 
 class ConformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, heads, dropout=0.1):
+    def __init__(self, d_model, heads, dropout=0.1, batchnorm_momentum=0.1):
         super().__init__()
         self.ff_1 = FeedForwardConformer(d_model, d_ff=d_model*4, dropout=dropout)
         self.norm = nn.LayerNorm(d_model)
         self.attn = RelativeMultiHeadAttention(heads, d_model, dropout=dropout)
-        self.conv_module = ConvolutionModule(d_model, dropout=dropout)
+        self.conv_module = ConvolutionModule(d_model, dropout=dropout, batchnorm_momentum=batchnorm_momentum)
         self.ff_2 = FeedForwardConformer(d_model, d_ff=d_model*4, dropout=dropout)
 
         self.dropout_1 = nn.Dropout(dropout)

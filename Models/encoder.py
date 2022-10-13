@@ -37,10 +37,11 @@ class ConformerEncoder(nn.Module):
         self.N = hp.N_e
         self.heads = hp.heads
         self.iter_loss = hp.iter_loss
+        batchnorm_momentum = hp.batchnorm_momentum
         dropout = hp.dropout
         xscale = 1 #math.sqrt(d_model)
         self.pe = RelativePositionalEncoder(d_model, xscale=xscale, dropout=dropout)
-        self.layers = repeat(self.N, lambda: ConformerEncoderLayer(d_model, self.heads, dropout))
+        self.layers = repeat(self.N, lambda: ConformerEncoderLayer(d_model, self.heads, dropout, batchnorm_momentum=batchnorm_momentum))
         if len(hp.iter_loss) != 0:
             self.iter_out = repeat(len(self.iter_loss), lambda: nn.Linear(d_model, hp.vocab_size))
         self.norm = nn.LayerNorm(d_model)
