@@ -21,7 +21,7 @@ class TrainDatasets(Dataset):
     """
     Dataset class.
     """
-    def __init__(self, csv_file, hp, root_dir=None, spec_aug=False, feat_norm=[None, None]):
+    def __init__(self, csv_file, hp, lengths_file=None, root_dir=None, spec_aug=False, feat_norm=[None, None]):
         """
         Args:                                                                   
             csv_file (string): Path to the csv file with annotations.           
@@ -37,6 +37,8 @@ class TrainDatasets(Dataset):
         self.sp.Load(self.hp.spm_model)
         self.spec_aug = spec_aug
         self.dev_mode = hp.dev_mode
+        if lengths_file is None:
+            lengths_file = hp.lengths_file
 
         self.mean_utt = hp.mean_utt
         if feat_norm[0] is not None:
@@ -46,7 +48,7 @@ class TrainDatasets(Dataset):
         else:
             self.feat_norm = False
 
-        if self.hp.lengths_file is None or not os.path.exists(self.hp.lengths_file):
+        if lengths_file is None or not os.path.exists(lengths_file):
             print('lengths_file is not exists. Make...')
             lengths_list = []
             pbar = tqdm(range(len(self.landmarks_frame)))
@@ -58,12 +60,11 @@ class TrainDatasets(Dataset):
                 elif '.npy' in mel_name:
                     mel_input = np.load(mel_name)
                     mel_length = mel_input.shape[0]
-                #mel_length = int(self.landmarks_frame.loc[idx, 2])
                 length = mel_length
                 lengths_list.append(length)
                 
             self.lengths_np = np.array(lengths_list)
-            np.save(self.hp.lengths_file, self.lengths_np)
+            np.save(lengths_file, self.lengths_np)
 
     def load_htk(self, filename):
         fh = open(filename, "rb")
@@ -144,6 +145,12 @@ class TrainDatasets(Dataset):
             #mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=2, replace_with_zero=True), T=T, num_masks=2, replace_with_zero=True)
             mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=self.hp.num_F, replace_with_zero=True, random_mask=self.hp.random_mask, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
             mel_length = mel_input.shape[0]
+        elif self.hp.separate_tts_specaugment:
+            mel_input = torch.from_numpy(mel_input)
+            num_T = min(20, math.floor(0.04*mel_length))
+            T = math.floor(0.04*mel_length)
+            if 'tts_augment' in mel_name:
+                mel_input = self._time_mask(self._freq_mask(mel_input, F=self.hp.spec_size_f, num_masks=self.hp.num_F, replace_with_zero=True, random_mask=self.hp.random_mask, granularity=self.hp.granularity), T=T, num_masks=num_T, replace_with_zero=True)
         # mel_input = np.concatenate([np.zeros([1,self.hp.num_mels], np.float32), mel[:-1,:]], axis=0)
         text_length = len(text)                                                 
         pos_text = np.arange(1, text_length + 1)
@@ -331,7 +338,7 @@ class LengthsBatchSampler(Sampler):
     LengthsBatchSampler - Sampler for variable batch size. Mainly, we use it for Transformer.
     It requires lengths.
     """
-    def __init__(self, dataset, n_lengths, lengths_file=None, shuffle=True, shuffle_one_time=False, reverse=False, shuffle_all=False):
+    def __init__(self, dataset, n_lengths, lengths_file=None, shuffle=True, shuffle_one_time=False, reverse=False, shuffle_all=False, indices_ref=None):
         assert not ((shuffle == reverse) and shuffle is True), 'shuffle and reverse cannot set True at the same time.'
 
         print('{} is loading.'.format(lengths_file))
@@ -381,6 +388,73 @@ class LengthsBatchSampler(Sampler):
                     # mel_lengths += curr_len
                     max_len = max(max_len, curr_len)
                     indices.extend([idx_rand])
+                    self.count += 1
+                all_indices.append(indices)
+       
+        return all_indices
+
+    def __iter__(self):
+        if self.shuffle:
+            np.random.shuffle(self.all_indices)
+        if self.reverse:
+            self.all_indices.reverse()
+
+        for indices in self.all_indices:
+            yield indices
+        
+        if self.shuffle_all:
+            print('shuffle_all')
+            self.all_indices = self._batch_indices()
+
+    def __len__(self):
+        return len(self.all_indices)
+
+
+class LengthsBlancingBatchSampler(Sampler):
+    """
+    LengthsBatchSampler - Sampler for variable batch size. Mainly, we use it for Transformer.
+    It requires lengths.
+    """
+    def __init__(self, dataset, n_lengths, lengths_file=None, shuffle=True, shuffle_one_time=False, reverse=False, shuffle_all=False, balancing_ratio=[2,9]):
+        assert not ((shuffle == reverse) and shuffle is True), 'shuffle and reverse cannot set True at the same time.'
+
+        print('{} is loading.'.format(lengths_file))
+        self.lengths_np = np.load(lengths_file)
+        assert len(dataset) == len(self.lengths_np), 'mismatch the number of lines between dataset and {}'.format(lengths_file)
+        
+        self.n_lengths = n_lengths
+        self.shuffle = shuffle
+        self.shuffle_one_time = shuffle_one_time
+        self.shuffle_all = shuffle_all
+        self.reverse = reverse
+        self.all_indices = self._batch_indices()
+        if shuffle_one_time:
+            np.random.shuffle(self.all_indices)
+
+        self.balancing_ratio = balancing_ratio
+
+    def _batch_indices(self):
+        self.count = 0
+        self.remain_indices0 = []
+        self.remain_indices1 = []
+        all_indices = []
+        
+        if not self.shuffle_all:
+            while self.count + 1 < len(self.lengths_np):
+                indices = []
+                max_len = 0
+                count_tags = [0, 0]
+                while self.count < len(self.lengths_np):
+                    curr_len, tag = self.lengths_np[self.count]
+                    if tag == 0:
+                        count_tags[0] += 1
+                    else:
+                        count_tags[1] += 1
+                    mel_lengths = max(max_len, curr_len) * (len(indices) + 1)
+                    if mel_lengths > self.n_lengths or (self.count + 1) > len(self.lengths_np):
+                        break
+                    max_len = max(max_len, curr_len)
+                    indices.extend([self.count])
                     self.count += 1
                 all_indices.append(indices)
        
@@ -507,11 +581,11 @@ class NumBatchSampler(Sampler):
     def __len__(self):
         return len(self.all_indices)
 
-def get_dataset(script_file, hp, spec_aug=True, feat_norm=[None, None]):
+def get_dataset(script_file, hp, lengths_file=None, spec_aug=True, feat_norm=[None, None]):
     #print('script_file = {}'.format(script_file))
     #print('spec_auc = {}'.format(spec_aug))
     #print('feat norm = {}'.format(feat_norm))
-    return TrainDatasets(script_file, hp, spec_aug=spec_aug, feat_norm=feat_norm)
+    return TrainDatasets(script_file, hp, lengths_file=lengths_file, spec_aug=spec_aug, feat_norm=feat_norm)
 
 if __name__ == '__main__':
     from utils import hparams as hp

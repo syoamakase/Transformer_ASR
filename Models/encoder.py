@@ -60,3 +60,60 @@ class ConformerEncoder(nn.Module):
                 iter_preds.append(pred)
             attns_enc[:,i] = attn_enc.detach()
         return self.norm(x), attns_enc, iter_preds
+
+
+#class Emformer(nn.Module):
+#    def __init__(self, hp,
+#        input_dim: int,
+#        num_heads: int,
+#        ffn_dim: int,
+#        num_layers: int,
+#        segment_length: int,
+#        dropout: float = 0.0,
+#        activation: str = "relu",
+#        left_context_length: int = 0,
+#        right_context_length: int = 0,
+#        max_memory_size: int = 0,
+#        weight_init_scale_strategy: Optional[str] = "depthwise",
+#        tanh_on_mem: bool = False,
+#        negative_inf: float = -1e8,
+#    ):
+#        super().__init__()
+#
+#        self.dropout = nn.Dropout(dropout)
+#        self.memory_op = nn.AvgPool1d(kernel_size=segment_length, stride=segment_length, ceil_mode=True)
+#
+#        activate_module = self._get_activation_module(activation)
+#        self.pos_ff = nn.Sequential(
+#            nn.LayerNorm(input_dim),
+#            nn.Linear(input_dim, ffn_dim),
+#            activation_module,
+#            nn.Dropout(dropout),
+#            nn.Linear(ffn_dim, input_dim),
+#            nn.Dropout(dropout)
+#        )
+#        self.layer_norm_input = nn.LayerNorm(input_dim)
+#        self.layer_norm_output = nn.LayerNorm(input_dim)
+#        
+#        self.left_contect_length = left_context_length
+#        self.segment_length = segment_length
+#        self.max_memory_size = max_memory_size
+#
+#        self.use_mem = max_memory_size > 0
+#
+#    def forward(nn.Module):
+#        pass
+#
+#
+#    def _get_activation_module(activation: str) -> torch.nn.Module:
+#        if activation == "relu":
+#            return torch.nn.ReLU()
+#        elif activation == "gelu":
+#            return torch.nn.GELU()
+#        elif activation == "silu":
+#            return torch.nn.SiLU()
+#        else:
+#            raise ValueError(f"Unsupported activation {activation}")
+#
+#    def _init_state(self, batch_size, device):
+#        empty_memory = torch.zeros(self.max_memory_size, batch_size, self.input_dim, device=device)
