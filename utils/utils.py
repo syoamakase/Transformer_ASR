@@ -10,9 +10,6 @@ import torch.nn as nn
 from shutil import copyfile
 import scipy.io.wavfile
 
-#import hparams as hp
-#from utils import hparams as hp
-
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def load_lmfb_from_wav(hp, load_file):
@@ -304,6 +301,14 @@ def overwrite_hparams(args):
         if value is not None and value != 'load_name':
             setattr(hp, key, value)
 
+def decode_ids(spm_model, text_seq):
+    sp = spm.SentencePieceProcessor()
+    sp.Load(spm_model)
+    return sp.DecodeIds(text_seq)
+
+def get_learning_rate(step, warmup_step, warmup_factor, d_model):
+    return warmup_factor * min(step ** -0.5, step * warmup_step ** -1.5) * (d_model ** -0.5)
+
 def fill_variables(hp, verbose=True):
     default_var = {'pe_alpha': False, 'stop_lr_change': 100000000, 'feed_forward': 'linear', 'optimizer': 'adam', 'mel_dim':80, 'is_flat_start':False,'dataset_shuffle_all':False, 'optimizer_type': 'Noam', 'init_lr':1e-3, 'save_per_epoch': 50, 'save_attention_per_step': 2000, 'num_F':2,
                     'accum_grad':1, 'N_e':12, 'N_d':6, 'heads':4, 'd_model_e':256, 'd_model_d':256, 'encoder': None, 'amp': False, 'comment':'', 'granularity':1, 'subsampling_rate': 4, 'frame_stacking':1, 'decoder_rel_pos':False, 'random_mask':False, 'decoder': 'Transformer', 'cnn_avepool':False,
@@ -314,14 +319,15 @@ def fill_variables(hp, verbose=True):
                 print('{} is not found in hparams. defalut {} is used.'.format(key, value))
             setattr(hp, key, value)
 
-    dev_var = {'swish_lstm':False, 'norm_lstm':False, 'load_name_lm_2':None, 'weight_dropout':None, 'dev_mode': None}
+    dev_var = {'swish_lstm':False, 'norm_lstm':False, 'load_name_lm_2':None, 'weight_dropout':None, 'dev_mode': None, 'iter_loss':[], 'decoder_swish':False, 'use_lm_loss':False, 'eps_lm_loss': 0.0, 'n_model_d':2, 
+               'use_aux_transducer_loss':False, 'use_symm_kl_div_loss':False, 'separate_tts_specaugment': True, 'batchnorm_momentum':0.1}
     for key, value in dev_var.items():
         if not hasattr(hp, key):
             if verbose:
                 print('{} is not found in hparams in development. defalut {} is used.'.format(key, value))
             setattr(hp, key, value)
 
-def decode_ids(spm_model, text_seq):
-    sp = spm.SentencePieceProcessor()
-    sp.Load(spm_model)
-    return sp.DecodeIds(text_seq)
+    if hasattr(hp, 'mlt_weight'):
+        print('mlt exists!! please modify!!')
+        setattr(hp, 'mtl_weight', hp.mlt_weight)
+

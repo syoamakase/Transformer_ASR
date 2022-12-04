@@ -237,7 +237,7 @@ def attention(q, k, v, d_k, mask=None, dropout=None):
     return output, scores
 
 class ConvolutionModule(nn.Module):
-    def __init__(self, d_model, dropout=0.1):
+    def __init__(self, d_model, dropout=0.1, batchnorm_momentum=0.1):
         super().__init__()
         causal = False
         kernel_size = 31
@@ -247,7 +247,7 @@ class ConvolutionModule(nn.Module):
         self.pointwise_conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_model*2, kernel_size=1)
         self.depth_conv1 = DepthwiseConv(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, padding=padding)
         #self.depth_conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, stride=1, padding=15, groups=d_model)
-        self.batch_norm = nn.BatchNorm1d(d_model)
+        self.batch_norm = nn.BatchNorm1d(d_model, momentum=batchnorm_momentum)
         self.swish = Swish()
         self.pointwise_conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=1)
         self.dropout = nn.Dropout(dropout)
