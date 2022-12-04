@@ -91,7 +91,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             text_input = text[:, :-1]
             src_mask, trg_mask = create_masks(pos_mel, pos_text[:, :-1])
 
-        with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
+        with torch.cuda.amp.autocast(hp.amp): # and torch.autograd.set_detect_anomaly(True):
             if args.n_gpus > 1:
                 dist.barrier()
             if hp.dev_mode:
@@ -346,7 +346,7 @@ def cleanup():
 
 
 def run_distributed(fn, args, hp):
-    port = '60' + str(int(time.time()))[-4:]
+    port = '60' + str(int(time.time()))[-3:]
     #port = str(np.random.randint(600000, 610000)) 
     print(f'port = {port}')
     try:
